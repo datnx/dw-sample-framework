@@ -324,12 +324,33 @@ private:
     std::weak_ptr<TextureCube> m_origin_texture;
 };
 
+class Renderbuffer : public Object
+{
+public:
+    using Ptr = std::shared_ptr<Renderbuffer>;
+
+    static Renderbuffer::Ptr create(uint32_t w, uint32_t h, GLenum internal_format);
+
+    ~Renderbuffer();
+
+    void set_name(const std::string& name);
+
+    GLuint id();
+
+private:
+    Renderbuffer(uint32_t w, uint32_t h, GLenum internal_format);
+
+private:
+    GLuint m_gl_rbo;
+};
+
 class Framebuffer : public Object
 {
 public:
     using Ptr = std::shared_ptr<Framebuffer>;
 
     static Framebuffer::Ptr create(std::vector<Texture::Ptr> color_attachments, Texture::Ptr depth_stencil_attachment);
+    static Framebuffer::Ptr create(std::vector<Texture::Ptr> color_attachments, Renderbuffer::Ptr depth_stencil_attachment);
 
     ~Framebuffer();
 
@@ -340,6 +361,7 @@ public:
 
 private:
     Framebuffer(std::vector<Texture::Ptr> color_attachments, Texture::Ptr depth_stencil_attachment);
+    Framebuffer(std::vector<Texture::Ptr> color_attachments, Renderbuffer::Ptr depth_stencil_attachment);
 
 private:
     void check_status();

@@ -1348,7 +1348,51 @@ TextureCubeView::~TextureCubeView()
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
+Renderbuffer::Ptr Renderbuffer::create(uint32_t w, uint32_t h, GLenum internal_format)
+{
+    return std::shared_ptr<Renderbuffer>(new Renderbuffer(w, h, internal_format));
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------
+
+Renderbuffer::Renderbuffer(uint32_t w, uint32_t h, GLenum internal_format) :
+    Object(GL_RENDERBUFFER)
+{
+    glCreateRenderbuffers(1, &m_gl_rbo);
+    glNamedRenderbufferStorage(m_gl_rbo, internal_format, w, h);
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------
+
+Renderbuffer::~Renderbuffer()
+{
+    glDeleteRenderbuffers(1, &m_gl_rbo);
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------
+
+void Renderbuffer::set_name(const std::string& name)
+{
+    Object::set_name(m_gl_rbo, name);
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------
+
+GLuint Renderbuffer::id()
+{
+    return m_gl_rbo;
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------
+
 Framebuffer::Ptr Framebuffer::create(std::vector<Texture::Ptr> color_attachments, Texture::Ptr depth_stencil_attachment)
+{
+    return std::shared_ptr<Framebuffer>(new Framebuffer(color_attachments, depth_stencil_attachment));
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------
+
+Framebuffer::Ptr Framebuffer::create(std::vector<Texture::Ptr> color_attachments, Renderbuffer::Ptr depth_stencil_attachment)
 {
     return std::shared_ptr<Framebuffer>(new Framebuffer(color_attachments, depth_stencil_attachment));
 }
@@ -1372,6 +1416,29 @@ Framebuffer::Framebuffer(std::vector<Texture::Ptr> color_attachments, Texture::P
 
     if (depth_stencil_attachment)
         glNamedFramebufferTexture(m_gl_fbo, GL_DEPTH_ATTACHMENT, depth_stencil_attachment->id(), 0);
+
+    check_status();
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------
+
+Framebuffer::Framebuffer(std::vector<Texture::Ptr> color_attachments, Renderbuffer::Ptr depth_stencil_attachment) :
+    Object(GL_FRAMEBUFFER)
+{
+    glCreateFramebuffers(1, &m_gl_fbo);
+
+    GLuint attachments[16];
+
+    for (int i = 0; i < color_attachments.size(); i++)
+    {
+        glNamedFramebufferTexture(m_gl_fbo, GL_COLOR_ATTACHMENT0 + i, color_attachments[i]->id(), 0);
+        attachments[i] = GL_COLOR_ATTACHMENT0 + i;
+    }
+
+    glNamedFramebufferDrawBuffers(m_gl_fbo, color_attachments.size(), attachments);
+
+    if (depth_stencil_attachment)
+        glNamedFramebufferRenderbuffer(m_gl_fbo, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth_stencil_attachment->id());
 
     check_status();
 }
