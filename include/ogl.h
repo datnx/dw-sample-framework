@@ -350,7 +350,7 @@ public:
     using Ptr = std::shared_ptr<Framebuffer>;
 
     static Framebuffer::Ptr create(std::vector<Texture::Ptr> color_attachments, Texture::Ptr depth_stencil_attachment);
-    static Framebuffer::Ptr create(std::vector<Texture::Ptr> color_attachments, Renderbuffer::Ptr depth_stencil_attachment);
+    static Framebuffer::Ptr create_with_renderbuffer(std::vector<Texture::Ptr> color_attachments, Renderbuffer::Ptr depth_stencil_attachment);
 
     ~Framebuffer();
 
@@ -362,6 +362,7 @@ public:
 private:
     Framebuffer(std::vector<Texture::Ptr> color_attachments, Texture::Ptr depth_stencil_attachment);
     Framebuffer(std::vector<Texture::Ptr> color_attachments, Renderbuffer::Ptr depth_stencil_attachment);
+    Framebuffer(std::vector<Texture::Ptr> color_attachments);
 
 private:
     void check_status();

@@ -1387,14 +1387,22 @@ GLuint Renderbuffer::id()
 
 Framebuffer::Ptr Framebuffer::create(std::vector<Texture::Ptr> color_attachments, Texture::Ptr depth_stencil_attachment)
 {
-    return std::shared_ptr<Framebuffer>(new Framebuffer(color_attachments, depth_stencil_attachment));
+    if (depth_stencil_attachment)
+    {
+        return std::shared_ptr<Framebuffer>(new Framebuffer(color_attachments, depth_stencil_attachment));
+    }
+    return std::shared_ptr<Framebuffer>(new Framebuffer(color_attachments));
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
-Framebuffer::Ptr Framebuffer::create(std::vector<Texture::Ptr> color_attachments, Renderbuffer::Ptr depth_stencil_attachment)
+Framebuffer::Ptr Framebuffer::create_with_renderbuffer(std::vector<Texture::Ptr> color_attachments, Renderbuffer::Ptr depth_stencil_attachment)
 {
-    return std::shared_ptr<Framebuffer>(new Framebuffer(color_attachments, depth_stencil_attachment));
+    if (depth_stencil_attachment)
+    {
+        return std::shared_ptr<Framebuffer>(new Framebuffer(color_attachments, depth_stencil_attachment));
+    }
+    return std::shared_ptr<Framebuffer>(new Framebuffer(color_attachments));
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------
@@ -1414,8 +1422,7 @@ Framebuffer::Framebuffer(std::vector<Texture::Ptr> color_attachments, Texture::P
 
     glNamedFramebufferDrawBuffers(m_gl_fbo, color_attachments.size(), attachments);
 
-    if (depth_stencil_attachment)
-        glNamedFramebufferTexture(m_gl_fbo, GL_DEPTH_ATTACHMENT, depth_stencil_attachment->id(), 0);
+    glNamedFramebufferTexture(m_gl_fbo, GL_DEPTH_ATTACHMENT, depth_stencil_attachment->id(), 0);
 
     check_status();
 }
@@ -1437,8 +1444,27 @@ Framebuffer::Framebuffer(std::vector<Texture::Ptr> color_attachments, Renderbuff
 
     glNamedFramebufferDrawBuffers(m_gl_fbo, color_attachments.size(), attachments);
 
-    if (depth_stencil_attachment)
-        glNamedFramebufferRenderbuffer(m_gl_fbo, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth_stencil_attachment->id());
+    glNamedFramebufferRenderbuffer(m_gl_fbo, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth_stencil_attachment->id());
+
+    check_status();
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------
+
+Framebuffer::Framebuffer(std::vector<Texture::Ptr> color_attachments) :
+    Object(GL_FRAMEBUFFER)
+{
+    glCreateFramebuffers(1, &m_gl_fbo);
+
+    GLuint attachments[16];
+
+    for (int i = 0; i < color_attachments.size(); i++)
+    {
+        glNamedFramebufferTexture(m_gl_fbo, GL_COLOR_ATTACHMENT0 + i, color_attachments[i]->id(), 0);
+        attachments[i] = GL_COLOR_ATTACHMENT0 + i;
+    }
+
+    glNamedFramebufferDrawBuffers(m_gl_fbo, color_attachments.size(), attachments);
 
     check_status();
 }
