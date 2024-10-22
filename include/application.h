@@ -46,6 +46,7 @@ struct AppSettings
 #else
     int  major_ver             = 4;
     bool enable_debug_callback = false;
+    int  num_sample            = 8;
 #endif
 };
 

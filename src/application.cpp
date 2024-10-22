@@ -197,7 +197,7 @@ bool Application::init_base(int argc, const char* argv[])
 
 #    if !defined(__EMSCRIPTEN__)
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-    glfwWindowHint(GLFW_SAMPLES, 8);
+    glfwWindowHint(GLFW_SAMPLES, settings.num_sample);
 #    endif
 
 #    if __APPLE__
