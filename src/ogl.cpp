@@ -1549,12 +1549,12 @@ Shader::Ptr Shader::create(GLenum type, std::string source)
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
-Shader::Shader(GLenum type, std::string source) :
+Shader::Shader(GLenum type, std::string source, std::string prefix) :
     m_type(type), Object(GL_SHADER)
 {
     m_gl_shader = glCreateShader(type);
 
-    source = "#version 450 core\n" + std::string(source);
+    source = prefix + std::string(source);
 
     GLint  success;
     GLchar log[512];

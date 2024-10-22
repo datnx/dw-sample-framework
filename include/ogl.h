@@ -389,7 +389,7 @@ public:
     void set_name(const std::string& name);
 
 private:
-    Shader(GLenum type, std::string source);
+    Shader(GLenum type, std::string source, std::string prefix = "#version 450 core\n");
 
 private:
     bool   m_compiled;
