@@ -1542,9 +1542,9 @@ void Framebuffer::set_name(const std::string& name)
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
-Shader::Ptr Shader::create(GLenum type, std::string source)
+Shader::Ptr Shader::create(GLenum type, std::string source, std::string prefix)
 {
-    return std::shared_ptr<Shader>(new Shader(type, source));
+    return std::shared_ptr<Shader>(new Shader(type, source, prefix));
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------
