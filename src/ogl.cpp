@@ -1511,7 +1511,7 @@ void Framebuffer::check_status()
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
-Shader::Ptr Shader::create_from_file(GLenum type, std::string path, std::vector<std::string> defines)
+Shader::Ptr Shader::create_from_file(GLenum type, std::string path, std::vector<std::string> defines, std::string prefix)
 {
     std::string source;
 
@@ -1525,7 +1525,7 @@ Shader::Ptr Shader::create_from_file(GLenum type, std::string path, std::vector<
         return nullptr;
     }
 
-    Shader::Ptr shader = Shader::create(type, source);
+    Shader::Ptr shader = Shader::create(type, source, prefix);
 
     if (shader->compiled())
         return shader;

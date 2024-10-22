@@ -377,7 +377,7 @@ class Shader : public Object
 public:
     using Ptr = std::shared_ptr<Shader>;
 
-    static Shader::Ptr create_from_file(GLenum type, std::string path, std::vector<std::string> defines = std::vector<std::string>());
+    static Shader::Ptr create_from_file(GLenum type, std::string path, std::vector<std::string> defines = std::vector<std::string>(), std::string prefix = "#version 450 core\n");
 
     static Shader::Ptr create(GLenum type, std::string source, std::string prefix = "#version 450 core\n");
 
