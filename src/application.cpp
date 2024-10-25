@@ -207,6 +207,11 @@ bool Application::init_base(int argc, const char* argv[])
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
 #    endif
 
+    if (settings.enable_debug_callback)
+    {
+        glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, true);
+    }
+
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, major_ver);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, minor_ver);
     glfwSwapInterval(m_vsync ? 1 : 0);
