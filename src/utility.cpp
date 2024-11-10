@@ -260,6 +260,8 @@ bool preprocess_shader(const std::string& path, const std::string& src, std::str
                 out += "#endif\n\n";
             }
         }
+        else if (line.find("#version") != std::string::npos)
+            out = line + "\n\n" + out + "\n";
         else
             out += line + "\n";
     }
