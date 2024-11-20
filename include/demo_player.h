@@ -44,7 +44,7 @@ public:
 
 class DemoPlayer
 {
-private:
+protected:
     float                  m_time                = 0.0f;
     bool                   m_is_playing          = false;
     bool                   m_debug_visualization = false;
