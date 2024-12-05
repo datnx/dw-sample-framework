@@ -67,5 +67,7 @@ extern void end_frame();
 extern void ui();
 #endif
 
+extern std::vector<std::string> get_names();
+
 }; // namespace profiler
 } // namespace dw

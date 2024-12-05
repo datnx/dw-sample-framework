@@ -321,6 +321,36 @@ struct Profiler
 
     // -----------------------------------------------------------------------------------------------------------------------------------
 
+    std::vector<std::string> get_names()
+    {
+        std::vector<std::string> names = {};
+
+        if (m_read_buffer_idx >= 0)
+        {
+            for (int32_t i = 0; i < m_sample_buffers[m_read_buffer_idx].index; i++)
+            {
+                auto& sample = m_sample_buffers[m_read_buffer_idx].samples[i];
+                if (sample->start)
+                {
+                    std::string name = sample->name;
+                    if (sample->type == SampleType::CPU_GPU)
+                    {
+                        names.push_back(name + "_cpu");
+                        names.push_back(name + "_gpu");
+                    }
+                    else
+                    {
+                        names.push_back(name);
+                    }
+                }
+            }
+        }
+
+        return names;
+    }
+
+    // -----------------------------------------------------------------------------------------------------------------------------------
+
     int32_t             m_read_buffer_idx  = -3;
     int32_t             m_write_buffer_idx = -1;
     Buffer              m_sample_buffers[BUFFER_COUNT];
@@ -441,6 +471,13 @@ void ui()
     g_profiler->ui();
 }
 #endif
+
+// -----------------------------------------------------------------------------------------------------------------------------------
+
+std::vector<std::string> get_names()
+{
+    return g_profiler->get_names();
+}
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 } // namespace profiler
