@@ -68,6 +68,7 @@ extern void ui();
 #endif
 
 extern std::vector<std::string> get_names();
+extern std::vector<float>       get_frame_time();
 
 }; // namespace profiler
 } // namespace dw

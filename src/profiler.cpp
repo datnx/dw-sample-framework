@@ -240,6 +240,8 @@ struct Profiler
 #if defined(DWSF_IMGUI)
     void ui()
     {
+        m_current_frame_time.clear();
+
         if (m_read_buffer_idx >= 0)
         {
             for (int32_t i = 0; i < m_sample_buffers[m_read_buffer_idx].index; i++)
@@ -261,6 +263,12 @@ struct Profiler
 
                     float gpu_time, cpu_time;
 
+                    if (sample->type != GPU)
+                    {
+                        cpu_time = (sample->end_sample->cpu_time - sample->cpu_time) * 0.001f;
+                        m_current_frame_time.emplace_back(cpu_time);
+                    }
+
                     if (sample->type != CPU)
                     {
                         uint64_t start_time = 0;
@@ -276,10 +284,8 @@ struct Profiler
 
                         uint64_t gpu_time_diff = end_time - start_time;
                                  gpu_time      = float(gpu_time_diff / 1000000.0);
+                        m_current_frame_time.emplace_back(gpu_time);
                     }
-
-                    if (sample->type != GPU)
-                        cpu_time = (sample->end_sample->cpu_time - sample->cpu_time) * 0.001f;
 
                     if (sample->type == CPU_GPU)
                     {
@@ -356,6 +362,7 @@ struct Profiler
     Buffer              m_sample_buffers[BUFFER_COUNT];
     std::stack<Sample*> m_sample_stack;
     std::stack<bool>    m_should_pop_stack;
+    std::vector<float>  m_current_frame_time;
 
 #if defined(DWSF_VULKAN)
     bool m_should_reset = true;
@@ -477,6 +484,13 @@ void ui()
 std::vector<std::string> get_names()
 {
     return g_profiler->get_names();
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------
+
+std::vector<float> get_frame_time()
+{
+    return g_profiler->m_current_frame_time;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------
