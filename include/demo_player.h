@@ -68,7 +68,7 @@ public:
     float        speed();
     void         set_speed(float speed);
     virtual void play();
-    void         stop();
+    virtual void stop();
     bool         is_playing();
     void         update(float dt, Camera* camera);
     glm::vec3    position();
