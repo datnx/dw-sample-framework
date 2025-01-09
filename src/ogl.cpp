@@ -670,7 +670,7 @@ void Texture2D::read_data(int mip_level, std::vector<uint8_t>& buffer)
     int w, h;
     extents(mip_level, w, h);
 
-    size_t size = is_compressed(mip_level) ? compressed_size(mip_level) : w * h * m_array_size * pixel_size_from_type(m_type) * num_channels_from_internal_format(m_format);
+    size_t size = is_compressed(mip_level) ? compressed_size(mip_level) : w * h * m_array_size * pixel_size_from_type(m_type) * num_channels_from_internal_format(m_internal_format);
     buffer.resize(size);
 
     if (is_compressed(mip_level))
@@ -867,7 +867,7 @@ void Texture3D::read_data(int mip_level, std::vector<uint8_t>& buffer)
     int w, h, d;
     extents(mip_level, w, h, d);
 
-    size_t size = is_compressed(mip_level) ? compressed_size(mip_level) : w * h * d * pixel_size_from_type(m_type) * num_channels_from_internal_format(m_format);
+    size_t size = is_compressed(mip_level) ? compressed_size(mip_level) : w * h * d * pixel_size_from_type(m_type) * num_channels_from_internal_format(m_internal_format);
     buffer.resize(size);
 
     if (is_compressed(mip_level))
@@ -1159,7 +1159,7 @@ void TextureCube::read_data(int mip_level, std::vector<uint8_t>& buffer)
     int w, h;
     extents(mip_level, w, h);
 
-    size_t size = is_compressed(mip_level) ? compressed_size(mip_level) : w * h * 6 * m_array_size * pixel_size_from_type(m_type) * num_channels_from_internal_format(m_format);
+    size_t size = is_compressed(mip_level) ? compressed_size(mip_level) : w * h * 6 * m_array_size * pixel_size_from_type(m_type) * num_channels_from_internal_format(m_internal_format);
     buffer.resize(size);
 
     if (is_compressed(mip_level))
