@@ -1106,27 +1106,22 @@ void DebugDraw::capsule(const float& _height, const float& _radius, const glm::v
 
 void DebugDraw::aabb(const glm::vec3& _min, const glm::vec3& _max, const glm::vec3& _c)
 {
-    glm::vec3 _pos = (_max + _min) * 0.5f;
-
-    glm::vec3 min = _pos + _min;
-    glm::vec3 max = _pos + _max;
-
     begin_batch();
 
-    line(min, glm::vec3(max.x, min.y, min.z), _c);
-    line(glm::vec3(max.x, min.y, min.z), glm::vec3(max.x, min.y, max.z), _c);
-    line(glm::vec3(max.x, min.y, max.z), glm::vec3(min.x, min.y, max.z), _c);
-    line(glm::vec3(min.x, min.y, max.z), min, _c);
+    line(_min, glm::vec3(_max.x, _min.y, _min.z), _c);
+    line(glm::vec3(_max.x, _min.y, _min.z), glm::vec3(_max.x, _min.y, _max.z), _c);
+    line(glm::vec3(_max.x, _min.y, _max.z), glm::vec3(_min.x, _min.y, _max.z), _c);
+    line(glm::vec3(_min.x, _min.y, _max.z), _min, _c);
 
-    line(glm::vec3(min.x, max.y, min.z), glm::vec3(max.x, max.y, min.z), _c);
-    line(glm::vec3(max.x, max.y, min.z), max, _c);
-    line(max, glm::vec3(min.x, max.y, max.z), _c);
-    line(glm::vec3(min.x, max.y, max.z), glm::vec3(min.x, max.y, min.z), _c);
+    line(glm::vec3(_min.x, _max.y, _min.z), glm::vec3(_max.x, _max.y, _min.z), _c);
+    line(glm::vec3(_max.x, _max.y, _min.z), _max, _c);
+    line(_max, glm::vec3(_min.x, _max.y, _max.z), _c);
+    line(glm::vec3(_min.x, _max.y, _max.z), glm::vec3(_min.x, _max.y, _min.z), _c);
 
-    line(min, glm::vec3(min.x, max.y, min.z), _c);
-    line(glm::vec3(max.x, min.y, min.z), glm::vec3(max.x, max.y, min.z), _c);
-    line(glm::vec3(max.x, min.y, max.z), max, _c);
-    line(glm::vec3(min.x, min.y, max.z), glm::vec3(min.x, max.y, max.z), _c);
+    line(_min, glm::vec3(_min.x, _max.y, _min.z), _c);
+    line(glm::vec3(_max.x, _min.y, _min.z), glm::vec3(_max.x, _max.y, _min.z), _c);
+    line(glm::vec3(_max.x, _min.y, _max.z), _max, _c);
+    line(glm::vec3(_min.x, _min.y, _max.z), glm::vec3(_min.x, _max.y, _max.z), _c);
 
     end_batch();
 }
