@@ -64,9 +64,9 @@ std::string get_gltf_metallic_roughness_texture_path(aiMaterial* material)
     }
 }
 
-std::string resolve_relative_path(const std::string& mesh_path, const std::string& path, bool is_gltf)
+std::string resolve_relative_path(const std::string& mesh_path, const std::string& path, bool is_gltf, bool is_obj)
 {
-    if (is_gltf)
+    if (is_gltf || is_obj)
         return utility::path_without_file(mesh_path) + "/" + path;
     else
         return path;
@@ -254,10 +254,13 @@ void Mesh::load_from_disk(
     Scene = importer.ReadFile(path, aiProcess_Triangulate | aiProcess_GenSmoothNormals | aiProcess_FlipUVs | aiProcess_CalcTangentSpace);
 
     bool        is_gltf   = false;
+    bool        is_obj    = false;
     std::string extension = utility::file_extension(path);
 
     if (extension == "gltf" || extension == "glb")
         is_gltf = true;
+    if (extension == "obj")
+        is_obj = true;
 
     m_sub_meshes.resize(Scene->mNumMeshes);
 
@@ -317,7 +320,7 @@ void Mesh::load_from_disk(
                     if (!texture_path.empty())
                     {
                         albedo_idx = texture_paths.size();
-                        texture_paths.push_back(resolve_relative_path(path, texture_path, is_gltf));
+                        texture_paths.push_back(resolve_relative_path(path, texture_path, is_gltf, is_obj));
                     }
                 }
                 else
@@ -332,7 +335,7 @@ void Mesh::load_from_disk(
                     if (!texture_path.empty())
                     {
                         albedo_idx = texture_paths.size();
-                        texture_paths.push_back(resolve_relative_path(path, texture_path, is_gltf));
+                        texture_paths.push_back(resolve_relative_path(path, texture_path, is_gltf, is_obj));
                     }
                 }
 
@@ -381,7 +384,7 @@ void Mesh::load_from_disk(
                         metallic_idx.x = texture_paths.size();
                         metallic_idx.y = 2;
 
-                        texture_paths.push_back(resolve_relative_path(path, roughness_metallic_path, is_gltf));
+                        texture_paths.push_back(resolve_relative_path(path, roughness_metallic_path, is_gltf, is_obj));
                     }
                 }
                 else
@@ -410,7 +413,7 @@ void Mesh::load_from_disk(
                         roughness_idx.x = texture_paths.size();
                         roughness_idx.y = is_gltf ? 1 : 0;
 
-                        texture_paths.push_back(resolve_relative_path(path, roughness_path, is_gltf));
+                        texture_paths.push_back(resolve_relative_path(path, roughness_path, is_gltf, is_obj));
                     }
 
                     // Try to find Metallic texture
@@ -437,7 +440,7 @@ void Mesh::load_from_disk(
                         metallic_idx.x = texture_paths.size();
                         metallic_idx.y = is_gltf ? 2 : 0;
 
-                        texture_paths.push_back(resolve_relative_path(path, metallic_path, is_gltf));
+                        texture_paths.push_back(resolve_relative_path(path, metallic_path, is_gltf, is_obj));
                     }
                 }
 
@@ -467,7 +470,7 @@ void Mesh::load_from_disk(
                     std::replace(emissive_path.begin(), emissive_path.end(), '\\', '/');
 
                     emissive_idx = texture_paths.size();
-                    texture_paths.push_back(resolve_relative_path(path, emissive_path, is_gltf));
+                    texture_paths.push_back(resolve_relative_path(path, emissive_path, is_gltf, is_obj));
                 }
 
                 // Try to find Normal texture
@@ -484,7 +487,7 @@ void Mesh::load_from_disk(
                     std::replace(normal_path.begin(), normal_path.end(), '\\', '/');
 
                     normal_idx = texture_paths.size();
-                    texture_paths.push_back(resolve_relative_path(path, normal_path, is_gltf));
+                    texture_paths.push_back(resolve_relative_path(path, normal_path, is_gltf, is_obj));
                 }
 
                 Material::Ptr mat = Material::load(
