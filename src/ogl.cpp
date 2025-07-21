@@ -166,8 +166,6 @@ void Texture::set_mag_filter(GLenum filter)
 
 void Texture::bind_image(uint32_t unit, uint32_t mip_level, uint32_t layer, GLenum access, GLenum format)
 {
-    bind(unit);
-
     if (m_array_size > 1 || m_target == GL_TEXTURE_3D)
         glBindImageTexture(unit, m_gl_tex, mip_level, GL_TRUE, layer, access, format);
     else
