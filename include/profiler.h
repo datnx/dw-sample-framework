@@ -11,7 +11,7 @@
 #if defined(DWSF_VULKAN)
 #    define DW_SCOPED_SAMPLE(name, type, cmd_buf) dw::profiler::ScopedProfile __FILE__##__LINE__(name, type, cmd_buf)
 #else
-#    define DW_SCOPED_SAMPLE(name, type) dw::profiler::ScopedProfile __FILE__##__LINE__(name, type)
+#    define DW_SCOPED_SAMPLE(name, ...) dw::profiler::ScopedProfile __FILE__##__LINE__(name, ##__VA_ARGS__)
 #endif
 
 namespace dw
