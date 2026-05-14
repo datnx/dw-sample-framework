@@ -18,6 +18,8 @@ namespace dw
 {
 namespace profiler
 {
+constexpr int BUFFER_COUNT = 4;
+
 enum SampleType
 {
     CPU,

@@ -4,11 +4,11 @@
 #include <timer.h>
 #include <stack>
 #include <vector>
+#include <logger.h>
 #if defined(DWSF_VULKAN)
 #    include <extensions_vk.h>
 #endif
 
-#define BUFFER_COUNT 3
 #define MAX_SAMPLES 256
 
 namespace dw
@@ -220,10 +220,10 @@ struct Profiler
         m_read_buffer_idx++;
         m_write_buffer_idx++;
 
-        if (m_read_buffer_idx == 3)
+        if (m_read_buffer_idx == BUFFER_COUNT)
             m_read_buffer_idx = 0;
 
-        if (m_write_buffer_idx == 3)
+        if (m_write_buffer_idx == BUFFER_COUNT)
             m_write_buffer_idx = 0;
     }
 
@@ -278,7 +278,9 @@ struct Profiler
                         m_sample_buffers[m_read_buffer_idx].query_pool->results(sample->query_index, 1, sizeof(uint64_t), &start_time, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
                         m_sample_buffers[m_read_buffer_idx].query_pool->results(sample->end_sample->query_index, 1, sizeof(uint64_t), &end_time, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
 #    else
+                        if (!sample->query->result_available()) DW_LOG_WARNING("stall");
                         sample->query->result_64(&start_time);
+                        if (!sample->end_sample->query->result_available()) DW_LOG_WARNING("stall");
                         sample->end_sample->query->result_64(&end_time);
 #    endif
 
@@ -357,7 +359,7 @@ struct Profiler
 
     // -----------------------------------------------------------------------------------------------------------------------------------
 
-    int32_t             m_read_buffer_idx  = -3;
+    int32_t             m_read_buffer_idx  = -BUFFER_COUNT;
     int32_t             m_write_buffer_idx = -1;
     Buffer              m_sample_buffers[BUFFER_COUNT];
     std::stack<Sample*> m_sample_stack;
