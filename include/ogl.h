@@ -455,6 +455,7 @@ public:
     bool    set_uniform(std::string name, uint32_t value);
     bool    set_uniform(std::string name, float value);
     bool    set_uniform(std::string name, glm::vec2 value);
+    bool    set_uniform(std::string name, glm::ivec2 value);
     bool    set_uniform(std::string name, glm::vec3 value);
     bool    set_uniform(std::string name, glm::vec4 value);
     bool    set_uniform(std::string name, glm::mat2 value);

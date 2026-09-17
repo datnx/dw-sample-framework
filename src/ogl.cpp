@@ -1788,6 +1788,17 @@ bool Program::set_uniform(std::string name, glm::vec2 value)
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------
+bool Program::set_uniform(std::string name, glm::ivec2 value)
+{
+    if (m_location_map.find(name) == m_location_map.end())
+        return false;
+
+    glUniform2i(m_location_map[name], value.x, value.y);
+
+    return true;
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------
 
 bool Program::set_uniform(std::string name, glm::vec3 value)
 {
