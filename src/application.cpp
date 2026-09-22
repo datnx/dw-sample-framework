@@ -243,17 +243,23 @@ bool Application::init_base(int argc, const char* argv[])
     m_vk_backend = vk::Backend::create(m_window,
                                        m_vsync,
                                        settings.srgb,
-#    if defined(_DEBUG)
-                                       true
-#    else
-                                       false
-#    endif
-                                       ,
+                                       settings.enable_validation,
+                                       settings.enable_nsight_aftermath,
                                        settings.ray_tracing,
                                        settings.device_extensions);
 
-    m_present_complete_semaphore = vk::Semaphore::create(m_vk_backend);
-    m_render_complete_semaphore = vk::Semaphore::create(m_vk_backend);
+    m_title += " - " + std::string(m_vk_backend->physical_device_properties().deviceName);
+
+    glfwSetWindowTitle(m_window, m_title.c_str());
+
+    const uint32_t max_frames_in_flights = m_vk_backend->swap_image_count();
+
+    for (uint32_t i = 0; i < max_frames_in_flights; i++)
+    {
+        m_render_complete_fences.push_back(vk::Fence::create(m_vk_backend));
+        m_render_complete_semaphores.push_back(vk::Semaphore::create(m_vk_backend));
+        m_present_complete_semaphores.push_back(vk::Semaphore::create(m_vk_backend));
+    }
 
     Material::initialize_common_resources(m_vk_backend);
 #else
@@ -278,38 +284,36 @@ bool Application::init_base(int argc, const char* argv[])
 #    if defined(DWSF_VULKAN)
     ImGui_ImplGlfw_InitForVulkan(m_window, false);
 
+    VkFormat swapchain_format = m_vk_backend->swap_chain_image_format();
+
+    VkPipelineRenderingCreateInfoKHR pipeline_rendering_info = {};
+
+    pipeline_rendering_info.sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    pipeline_rendering_info.colorAttachmentCount    = 1;
+    pipeline_rendering_info.pColorAttachmentFormats = &swapchain_format;
+    pipeline_rendering_info.depthAttachmentFormat   = VK_FORMAT_UNDEFINED;
+    pipeline_rendering_info.stencilAttachmentFormat = VK_FORMAT_UNDEFINED;
+
     ImGui_ImplVulkan_InitInfo init_info = {};
 
-    init_info.Instance        = m_vk_backend->instance();
-    init_info.PhysicalDevice  = m_vk_backend->physical_device();
-    init_info.Device          = m_vk_backend->device();
-    init_info.QueueFamily     = m_vk_backend->queue_infos().graphics_queue_index;
-    init_info.Queue           = m_vk_backend->graphics_queue();
-    init_info.PipelineCache   = nullptr;
-    init_info.DescriptorPool  = m_vk_backend->thread_local_descriptor_pool()->handle();
-    init_info.Allocator       = nullptr;
-    init_info.MinImageCount   = 2;
-    init_info.ImageCount      = m_vk_backend->swap_image_count();
-    init_info.CheckVkResultFn = nullptr;
+    init_info.Instance                    = m_vk_backend->instance();
+    init_info.PhysicalDevice              = m_vk_backend->physical_device();
+    init_info.Device                      = m_vk_backend->device();
+    init_info.QueueFamily                 = m_vk_backend->queue_infos().graphics_queue_index;
+    init_info.Queue                       = m_vk_backend->graphics_queue();
+    init_info.PipelineCache               = nullptr;
+    init_info.DescriptorPoolSize          = 32;
+    init_info.RenderPass                  = nullptr;
+    init_info.Allocator                   = nullptr;
+    init_info.MinImageCount               = 2;
+    init_info.ImageCount                  = m_vk_backend->swap_image_count();
+    init_info.CheckVkResultFn             = nullptr;
+    init_info.UseDynamicRendering         = true;
+    init_info.PipelineRenderingCreateInfo = pipeline_rendering_info;
 
-    ImGui_ImplVulkan_Init(&init_info, m_vk_backend->swapchain_render_pass()->handle());
+    ImGui_ImplVulkan_Init(&init_info);
 
-    vk::CommandBuffer::Ptr cmd_buf = m_vk_backend->allocate_graphics_command_buffer();
-
-    VkCommandBufferBeginInfo begin_info;
-    DW_ZERO_MEMORY(begin_info);
-
-    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-
-    vkBeginCommandBuffer(cmd_buf->handle(), &begin_info);
-
-    ImGui_ImplVulkan_CreateFontsTexture(cmd_buf->handle());
-
-    vkEndCommandBuffer(cmd_buf->handle());
-
-    m_vk_backend->flush_graphics({ cmd_buf });
-
-    ImGui_ImplVulkan_DestroyFontUploadObjects();
+    ImGui_ImplVulkan_CreateFontsTexture();
 #    else
     ImGui_ImplGlfw_InitForOpenGL(m_window, false);
     ImGui_ImplOpenGL3_Init(imgui_glsl_version);
@@ -339,7 +343,7 @@ bool Application::init_base(int argc, const char* argv[])
 
     if (!m_debug_draw.init(
 #if defined(DWSF_VULKAN)
-            m_vk_backend, m_vk_backend->swapchain_render_pass()
+            m_vk_backend
 #endif
                 ))
         return false;
@@ -386,8 +390,9 @@ void Application::shutdown_base()
     ImGui_ImplVulkan_Shutdown();
 #    endif
 
-    m_present_complete_semaphore.reset();
-    m_render_complete_semaphore.reset();
+    m_render_complete_fences.clear();
+    m_render_complete_semaphores.clear();
+    m_present_complete_semaphores.clear();
 
     m_vk_backend->~Backend();
 #else
@@ -428,12 +433,15 @@ void Application::render_gui(vk::CommandBuffer::Ptr cmd_buf)
 
 void Application::submit_and_present(const std::vector<vk::CommandBuffer::Ptr>& cmd_bufs)
 {
-    m_vk_backend->submit_graphics(cmd_bufs,
-                                  { m_present_complete_semaphore },
-                                  { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT },
-                                  { m_render_complete_semaphore });
+    const uint32_t semaphore_idx = m_frame_index % static_cast<uint32_t>(m_present_complete_semaphores.size());
+    const uint32_t fence_idx     = m_frame_index % static_cast<uint32_t>(m_render_complete_fences.size());
 
-    m_vk_backend->present({ m_render_complete_semaphore });
+    m_vk_backend->submit_graphics(cmd_bufs,
+                                  { m_present_complete_semaphores[semaphore_idx] },
+                                  { m_render_complete_semaphores[semaphore_idx] },
+                                  m_render_complete_fences[fence_idx]);
+
+    m_vk_backend->present({ m_render_complete_semaphores[semaphore_idx] });
 }
 
 #endif
@@ -453,7 +461,13 @@ void Application::begin_frame()
         m_should_recreate_swap_chain = false;
     }
 
-    m_vk_backend->acquire_next_swap_chain_image(m_present_complete_semaphore);
+    const uint32_t semaphore_idx = m_frame_index % static_cast<uint32_t>(m_present_complete_semaphores.size());
+    const uint32_t fence_idx     = m_frame_index % static_cast<uint32_t>(m_render_complete_fences.size());
+
+    m_render_complete_fences[fence_idx]->wait_for_completion();
+
+    if (!m_vk_backend->acquire_next_swap_chain_image(m_present_complete_semaphores[semaphore_idx]))
+        m_vk_backend->recreate_swapchain(m_vsync);
 
 #    if defined(DWSF_IMGUI)
     ImGui_ImplVulkan_NewFrame();
@@ -495,6 +509,8 @@ void Application::end_frame()
     m_timer.stop();
     m_delta         = m_timer.elapsed_time_milisec();
     m_delta_seconds = m_timer.elapsed_time_sec();
+
+    m_frame_index++;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------

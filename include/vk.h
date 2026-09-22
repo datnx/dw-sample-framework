@@ -2,12 +2,13 @@
 
 #if defined(DWSF_VULKAN)
 
-#    include <vulkan/vulkan.h>
+#    include <volk.h>
 #    include <vector>
 #    include <string>
 #    include <memory>
 #    include <stack>
 #    include <deque>
+#    include <unordered_map>
 
 struct GLFWwindow;
 struct VmaAllocator_T;
@@ -19,10 +20,9 @@ namespace dw
 namespace vk
 {
 class Object;
+class Buffer;
 class Image;
 class ImageView;
-class Framebuffer;
-class RenderPass;
 class CommandBuffer;
 class PipelineLayout;
 class CommandPool;
@@ -69,44 +69,64 @@ public:
 
     using Ptr = std::shared_ptr<Backend>;
 
-    static Backend::Ptr create(GLFWwindow* window, bool vsync, bool srgb_swapchain, bool enable_validation_layers = false, bool require_ray_tracing = false, std::vector<const char*> additional_device_extensions = std::vector<const char*>());
+    static Backend::Ptr create(GLFWwindow* window, bool vsync, bool srgb_swapchain, bool enable_validation_layers = false, bool enable_nsight_aftermath = false, bool require_ray_tracing = false, std::vector<const char*> additional_device_extensions = std::vector<const char*>());
 
     ~Backend();
 
-    std::shared_ptr<DescriptorSet>          allocate_descriptor_set(std::shared_ptr<DescriptorSetLayout> layout);
     std::shared_ptr<CommandBuffer>          allocate_graphics_command_buffer(bool begin = false);
     std::shared_ptr<CommandBuffer>          allocate_compute_command_buffer(bool begin = false);
     std::shared_ptr<CommandBuffer>          allocate_transfer_command_buffer(bool begin = false);
-    std::shared_ptr<CommandPool>            thread_local_graphics_command_pool();
-    std::shared_ptr<CommandPool>            thread_local_compute_command_pool();
-    std::shared_ptr<CommandPool>            thread_local_transfer_command_pool();
-    std::shared_ptr<DescriptorPool>         thread_local_descriptor_pool();
+    void                                    reset_command_pools();
+    std::shared_ptr<CommandPool>            graphics_command_pool();
+    std::shared_ptr<CommandPool>            compute_command_pool();
+    std::shared_ptr<CommandPool>            transfer_command_pool();
+    std::shared_ptr<DescriptorSet>          allocate_descriptor_set(std::shared_ptr<DescriptorSetLayout> layout);
+    std::shared_ptr<DescriptorPool>         descriptor_pool();
+    void                                    use_resource(VkPipelineStageFlags2          _stage,
+                                                         VkAccessFlags2                 _access,
+                                                         const std::shared_ptr<Buffer>& _buffer,
+                                                         size_t                         _offset = 0,
+                                                         size_t                         _size = 0);
+    void                                    use_resource(VkPipelineStageFlags2         _stage, 
+                                                         VkAccessFlags2                _access, 
+                                                         VkImageLayout                 _layout,
+                                                         const std::shared_ptr<Image>& _image, 
+                                                         VkImageSubresourceRange       _range);
+    void                                    use_resource(VkPipelineStageFlags2          _stage,
+                                                         VkAccessFlags2                 _access,
+                                                         VkBuffer                       _buffer,
+                                                         size_t                         _offset = 0,
+                                                         size_t                         _size = 0);
+    void                                    use_resource(VkPipelineStageFlags2         _stage,
+                                                         VkAccessFlags2                _access,
+                                                         VkImageLayout                 _layout,
+                                                         VkImage                       _image,
+                                                         VkImageSubresourceRange       _range,
+                                                         uint32_t                      _num_layers,
+                                                         uint32_t                      _num_levels);
+    void                                    flush_barriers(const std::shared_ptr<CommandBuffer>& _cmd_buf);
     void                                    submit_graphics(const std::vector<std::shared_ptr<CommandBuffer>>& cmd_bufs,
                                                             const std::vector<std::shared_ptr<Semaphore>>&     wait_semaphores,
-                                                            const std::vector<VkPipelineStageFlags>&           wait_stages,
-                                                            const std::vector<std::shared_ptr<Semaphore>>&     signal_semaphores);
+                                                            const std::vector<std::shared_ptr<Semaphore>>&     signal_semaphores,
+                                                            const std::shared_ptr<Fence>&                      signal_fence);
     void                                    submit_compute(const std::vector<std::shared_ptr<CommandBuffer>>& cmd_bufs,
                                                            const std::vector<std::shared_ptr<Semaphore>>&     wait_semaphores,
-                                                           const std::vector<VkPipelineStageFlags>&           wait_stages,
-                                                           const std::vector<std::shared_ptr<Semaphore>>&     signal_semaphores);
+                                                           const std::vector<std::shared_ptr<Semaphore>>&     signal_semaphores,
+                                                           const std::shared_ptr<Fence>&                      signal_fence);
     void                                    submit_transfer(const std::vector<std::shared_ptr<CommandBuffer>>& cmd_bufs,
                                                             const std::vector<std::shared_ptr<Semaphore>>&     wait_semaphores,
-                                                            const std::vector<VkPipelineStageFlags>&           wait_stages,
-                                                            const std::vector<std::shared_ptr<Semaphore>>&     signal_semaphores);
+                                                            const std::vector<std::shared_ptr<Semaphore>>&     signal_semaphores,
+                                                            const std::shared_ptr<Fence>&                      signal_fence);
     void                                    flush_graphics(const std::vector<std::shared_ptr<CommandBuffer>>& cmd_bufs);
     void                                    flush_compute(const std::vector<std::shared_ptr<CommandBuffer>>& cmd_bufs);
     void                                    flush_transfer(const std::vector<std::shared_ptr<CommandBuffer>>& cmd_bufs);
-    void                                    acquire_next_swap_chain_image(const std::shared_ptr<Semaphore>& semaphore);
+    bool                                    acquire_next_swap_chain_image(const std::shared_ptr<Semaphore>& semaphore);
     void                                    present(const std::vector<std::shared_ptr<Semaphore>>& semaphores);
-    bool                                    is_frame_done(uint32_t idx);
-    void                                    wait_for_frame(uint32_t idx);
     std::shared_ptr<Image>                  swapchain_image();
     std::shared_ptr<ImageView>              swapchain_image_view();
     std::vector<std::shared_ptr<ImageView>> swapchain_image_views();
     std::shared_ptr<Image>                  swapchain_depth_image();
     std::shared_ptr<ImageView>              swapchain_depth_image_view();
-    std::shared_ptr<Framebuffer>            swapchain_framebuffer();
-    std::shared_ptr<RenderPass>             swapchain_render_pass();
     void                                    recreate_swapchain(bool vsync);
 
     void             wait_idle();
@@ -121,9 +141,8 @@ public:
     size_t           min_dynamic_ubo_alignment();
     size_t           aligned_dynamic_ubo_size(size_t size);
     VkFormat         find_supported_format(const std::vector<VkFormat>& candidates, VkImageTiling tiling, VkFormatFeatureFlags features);
-    void             process_deletion_queue();
-    void             queue_object_deletion(std::shared_ptr<Object> object);
 
+    inline VkPhysicalDeviceProperties                         physical_device_properties() { return m_device_properties; }
     inline VkPhysicalDeviceRayTracingPipelinePropertiesKHR    ray_tracing_pipeline_properties() { return m_ray_tracing_pipeline_properties; }
     inline VkPhysicalDeviceAccelerationStructurePropertiesKHR acceleration_structure_properties() { return m_acceleration_structure_properties; }
     inline VkFormat                                           swap_chain_image_format() { return m_swap_chain_image_format; }
@@ -138,7 +157,7 @@ public:
     inline std::shared_ptr<ImageView>                         default_cubemap() { return m_default_cubemap_image_view; }
 
 private:
-    Backend(GLFWwindow* window, bool vsync, bool srgb_swapchain, bool enable_validation_layers, bool require_ray_tracing, std::vector<const char*> additional_device_extensions);
+    Backend(GLFWwindow* window, bool vsync, bool srgb_swapchain, bool enable_validation_layers, bool enable_nsight_aftermath, bool require_ray_tracing, std::vector<const char*> additional_device_extensions);
     void                     initialize();
     VkFormat                 find_depth_format();
     bool                     check_validation_layer_support(std::vector<const char*> layers);
@@ -152,58 +171,79 @@ private:
     bool                     is_device_suitable(VkPhysicalDevice device, VkPhysicalDeviceType type, QueueInfos& infos, SwapChainSupportDetails& details, std::vector<const char*> extensions, bool require_ray_tracing);
     bool                     find_queues(VkPhysicalDevice device, QueueInfos& infos);
     bool                     is_queue_compatible(VkQueueFlags current_queue_flags, int32_t graphics, int32_t compute, int32_t transfer);
-    bool                     create_logical_device(std::vector<const char*> extensions, bool require_ray_tracing);
+    bool                     create_logical_device(std::vector<const char*> extensions, bool require_ray_tracing, bool _use_nsight_aftermath);
     bool                     create_swapchain();
-    void                     create_render_pass();
     VkSurfaceFormatKHR       choose_swap_surface_format(const std::vector<VkSurfaceFormatKHR>& available_formats);
     VkPresentModeKHR         choose_swap_present_mode(const std::vector<VkPresentModeKHR>& available_modes);
     VkExtent2D               choose_swap_extent(const VkSurfaceCapabilitiesKHR& capabilities);
     void                     submit(VkQueue                                            queue,
                                     const std::vector<std::shared_ptr<CommandBuffer>>& cmd_bufs,
                                     const std::vector<std::shared_ptr<Semaphore>>&     wait_semaphores,
-                                    const std::vector<VkPipelineStageFlags>&           wait_stages,
-                                    const std::vector<std::shared_ptr<Semaphore>>&     signal_semaphores);
+                                    const std::vector<std::shared_ptr<Semaphore>>&     signal_semaphores,
+                                    const std::shared_ptr<Fence>&                      signal_fence);
     void                     flush(VkQueue queue, const std::vector<std::shared_ptr<CommandBuffer>>& cmd_bufs);
 
 private:
-    GLFWwindow*                                              m_window                = nullptr;
-    VkInstance                                               m_vk_instance           = nullptr;
-    VkDevice                                                 m_vk_device             = nullptr;
-    VkQueue                                                  m_vk_graphics_queue     = nullptr;
-    VkQueue                                                  m_vk_compute_queue      = nullptr;
-    VkQueue                                                  m_vk_transfer_queue     = nullptr;
-    VkQueue                                                  m_vk_presentation_queue = nullptr;
-    VkPhysicalDevice                                         m_vk_physical_device    = nullptr;
-    VkSurfaceKHR                                             m_vk_surface            = nullptr;
-    VkSwapchainKHR                                           m_vk_swap_chain         = nullptr;
-    VkDebugUtilsMessengerEXT                                 m_vk_debug_messenger    = nullptr;
-    VmaAllocator_T*                                          m_vma_allocator         = nullptr;
-    SwapChainSupportDetails                                  m_swapchain_details;
-    QueueInfos                                               m_selected_queues;
-    VkFormat                                                 m_swap_chain_image_format;
-    VkFormat                                                 m_swap_chain_depth_format;
-    VkExtent2D                                               m_swap_chain_extent;
-    VkPhysicalDeviceRayTracingPipelinePropertiesKHR          m_ray_tracing_pipeline_properties;
-    VkPhysicalDeviceAccelerationStructurePropertiesKHR       m_acceleration_structure_properties;
-    std::shared_ptr<RenderPass>                              m_swap_chain_render_pass;
-    std::vector<std::shared_ptr<Image>>                      m_swap_chain_images;
-    std::vector<std::shared_ptr<ImageView>>                  m_swap_chain_image_views;
-    std::vector<std::shared_ptr<Framebuffer>>                m_swap_chain_framebuffers;
-    std::shared_ptr<Sampler>                                 m_bilinear_sampler;
-    std::shared_ptr<Sampler>                                 m_trilinear_sampler;
-    std::shared_ptr<Sampler>                                 m_nearest_sampler;
-    std::shared_ptr<Image>                                   m_default_cubemap_image;
-    std::shared_ptr<ImageView>                               m_default_cubemap_image_view;
-    uint32_t                                                 m_image_index   = 0;
-    uint32_t                                                 m_current_frame = 0;
-    std::vector<std::shared_ptr<Fence>>                      m_in_flight_fences;
-    std::shared_ptr<Image>                                   m_swap_chain_depth      = nullptr;
-    std::shared_ptr<ImageView>                               m_swap_chain_depth_view = nullptr;
-    VkPhysicalDeviceProperties                               m_device_properties;
-    bool                                                     m_ray_tracing_enabled = false;
-    bool                                                     m_vsync               = false;
-    bool                                                     m_srgb_swapchain      = false;
-    std::deque<std::pair<std::shared_ptr<Object>, uint32_t>> m_deletion_queue;
+    struct BufferUsageInfo
+    {
+        VkPipelineStageFlags2 stage;
+        VkAccessFlags2        access;
+    };
+
+    struct ImageUsageInfo
+    {
+        VkPipelineStageFlags2 stage;
+        VkAccessFlags2        access;
+        VkImageLayout         layout;
+        uint32_t              last_frame_idx;
+    };
+
+    GLFWwindow*                                               m_window                = nullptr;
+    VkInstance                                                m_vk_instance           = nullptr;
+    VkDevice                                                  m_vk_device             = nullptr;
+    VkQueue                                                   m_vk_graphics_queue     = nullptr;
+    VkQueue                                                   m_vk_compute_queue      = nullptr;
+    VkQueue                                                   m_vk_transfer_queue     = nullptr;
+    VkQueue                                                   m_vk_presentation_queue = nullptr;
+    VkPhysicalDevice                                          m_vk_physical_device    = nullptr;
+    VkSurfaceKHR                                              m_vk_surface            = nullptr;
+    VkSwapchainKHR                                            m_vk_swap_chain         = nullptr;
+    VkDebugUtilsMessengerEXT                                  m_vk_debug_messenger    = nullptr;
+    VmaAllocator_T*                                           m_vma_allocator         = nullptr;
+    SwapChainSupportDetails                                   m_swapchain_details;
+    QueueInfos                                                m_selected_queues;
+    VkFormat                                                  m_swap_chain_image_format;
+    VkFormat                                                  m_swap_chain_depth_format;
+    VkExtent2D                                                m_swap_chain_extent;
+    VkPhysicalDeviceRayTracingPipelinePropertiesKHR           m_ray_tracing_pipeline_properties;
+    VkPhysicalDeviceAccelerationStructurePropertiesKHR        m_acceleration_structure_properties;
+    std::shared_ptr<DescriptorPool>                           m_descriptor_pool;
+    std::vector<std::shared_ptr<CommandPool>>                 m_graphics_command_pools;
+    std::vector<std::shared_ptr<CommandPool>>                 m_compute_command_pools;
+    std::vector<std::shared_ptr<CommandPool>>                 m_transfer_command_pools;
+    std::vector<std::shared_ptr<CommandBuffer>>               m_graphics_command_buffers;
+    std::vector<std::shared_ptr<CommandBuffer>>               m_compute_command_buffers;
+    std::vector<std::shared_ptr<CommandBuffer>>               m_transfer_command_buffers;
+    std::vector<std::shared_ptr<Image>>                       m_swap_chain_images;
+    std::vector<std::shared_ptr<ImageView>>                   m_swap_chain_image_views;
+    std::shared_ptr<Sampler>                                  m_bilinear_sampler;
+    std::shared_ptr<Sampler>                                  m_trilinear_sampler;
+    std::shared_ptr<Sampler>                                  m_nearest_sampler;
+    std::shared_ptr<Image>                                    m_default_cubemap_image;
+    std::shared_ptr<ImageView>                                m_default_cubemap_image_view;
+    uint32_t                                                  m_image_index   = 0;
+    uint32_t                                                  m_current_frame = 0;
+    uint32_t                                                  m_frame_idx             = 0;
+    std::shared_ptr<Image>                                    m_swap_chain_depth      = nullptr;
+    std::shared_ptr<ImageView>                                m_swap_chain_depth_view = nullptr;
+    VkPhysicalDeviceProperties                                m_device_properties;
+    std::unordered_map<uint64_t, BufferUsageInfo>             m_buffer_usage_info;
+    std::unordered_map<uint64_t, std::vector<ImageUsageInfo>> m_image_usage_info;
+    std::vector<VkBufferMemoryBarrier2>                       m_buffer_memory_barriers;
+    std::vector<VkImageMemoryBarrier2>                        m_image_memory_barriers;
+    bool                                                      m_ray_tracing_enabled = false;
+    bool                                                      m_vsync               = false;
+    bool                                                      m_srgb_swapchain      = false;
 };
 
 class Object
@@ -228,9 +268,9 @@ public:
 
     ~Image();
 
-    void upload_data(int array_index, int mip_level, void* data, size_t size, VkImageLayout src_layout = VK_IMAGE_LAYOUT_UNDEFINED, VkImageLayout dst_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    void generate_mipmaps(std::shared_ptr<CommandBuffer> cmd_buf, VkImageLayout src_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VkImageLayout dst_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VkImageAspectFlags aspect_flags = VK_IMAGE_ASPECT_COLOR_BIT, VkFilter filter = VK_FILTER_LINEAR);
-    void generate_mipmaps(VkImageLayout src_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VkImageLayout dst_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VkImageAspectFlags aspect_flags = VK_IMAGE_ASPECT_COLOR_BIT, VkFilter filter = VK_FILTER_LINEAR);
+    void upload_data(int array_index, int mip_level, void* data, size_t size, VkImageLayout dst_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    void generate_mipmaps(std::shared_ptr<CommandBuffer> cmd_buf, VkImageLayout dst_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VkImageAspectFlags aspect_flags = VK_IMAGE_ASPECT_COLOR_BIT, VkFilter filter = VK_FILTER_LINEAR);
+    void generate_mipmaps(VkImageLayout dst_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VkImageAspectFlags aspect_flags = VK_IMAGE_ASPECT_COLOR_BIT, VkFilter filter = VK_FILTER_LINEAR);
     void set_name(const std::string& name);
 
     inline VkImageType        type() { return m_type; }
@@ -289,45 +329,6 @@ private:
 
 private:
     VkImageView m_vk_image_view;
-};
-
-class RenderPass : public Object
-{
-public:
-    using Ptr = std::shared_ptr<RenderPass>;
-
-    static RenderPass::Ptr create(Backend::Ptr backend, std::vector<VkAttachmentDescription> attachment_descs, std::vector<VkSubpassDescription> subpass_descs, std::vector<VkSubpassDependency> subpass_deps);
-    ~RenderPass();
-
-    void set_name(const std::string& name);
-
-    inline const VkRenderPass& handle() { return m_vk_render_pass; }
-
-private:
-    RenderPass(Backend::Ptr backend, std::vector<VkAttachmentDescription> attachment_descs, std::vector<VkSubpassDescription> subpass_descs, std::vector<VkSubpassDependency> subpass_deps);
-
-private:
-    VkRenderPass m_vk_render_pass = nullptr;
-};
-
-class Framebuffer : public Object
-{
-public:
-    using Ptr = std::shared_ptr<Framebuffer>;
-
-    static Framebuffer::Ptr create(Backend::Ptr backend, RenderPass::Ptr render_pass, std::vector<ImageView::Ptr> views, uint32_t width, uint32_t height, uint32_t layers);
-
-    ~Framebuffer();
-
-    void set_name(const std::string& name);
-
-    inline const VkFramebuffer& handle() { return m_vk_framebuffer; }
-
-private:
-    Framebuffer(Backend::Ptr backend, RenderPass::Ptr render_pass, std::vector<ImageView::Ptr> views, uint32_t width, uint32_t height, uint32_t layers);
-
-private:
-    VkFramebuffer m_vk_framebuffer;
 };
 
 class Buffer : public Object
@@ -398,7 +399,6 @@ public:
 
     void set_name(const std::string& name);
 
-    void                          reset();
     inline const VkCommandBuffer& handle() { return m_vk_command_buffer; }
 
 private:
@@ -584,8 +584,15 @@ public:
         std::string                      shader_entry_names[6];
         uint32_t                         dynamic_state_count = 0;
         VkDynamicState                   dynamic_states[32];
+        uint32_t                         color_attachment_format_count = 0;
+        VkFormat                         color_attachment_formats[8];
+        VkFormat                         depth_attachment_format = VK_FORMAT_UNDEFINED;
+        VkFormat                         stencil_attachment_format = VK_FORMAT_UNDEFINED;
 
         Desc();
+        Desc& add_color_attachment_format(VkFormat format);
+        Desc& set_depth_attachment_format(VkFormat format);
+        Desc& set_stencil_attachment_format(VkFormat format);
         Desc& add_dynamic_state(const VkDynamicState& state);
         Desc& set_viewport_state(ViewportStateDesc& state);
         Desc& add_shader_stage(const VkShaderStageFlagBits& stage, const ShaderModule::Ptr& shader_module, const std::string& name);
@@ -597,13 +604,12 @@ public:
         Desc& set_depth_stencil_state(const DepthStencilStateDesc& state);
         Desc& set_color_blend_state(const ColorBlendStateDesc& state);
         Desc& set_pipeline_layout(const std::shared_ptr<PipelineLayout>& layout);
-        Desc& set_render_pass(const RenderPass::Ptr& render_pass);
         Desc& set_sub_pass(const uint32_t& subpass);
         Desc& set_base_pipeline(const GraphicsPipeline::Ptr& pipeline);
         Desc& set_base_pipeline_index(const int32_t& index);
     };
 
-    static GraphicsPipeline::Ptr create_for_post_process(Backend::Ptr backend, std::string vs, std::string fs, std::shared_ptr<PipelineLayout> pipeline_layout, RenderPass::Ptr render_pass);
+    static GraphicsPipeline::Ptr create_for_post_process(Backend::Ptr backend, std::string vs, std::string fs, std::shared_ptr<PipelineLayout> pipeline_layout, uint32_t attachment_count, VkFormat attachment_formats[]);
     static GraphicsPipeline::Ptr create(Backend::Ptr backend, Desc desc);
 
     inline const VkPipeline& handle() { return m_vk_pipeline; }
@@ -667,14 +673,14 @@ public:
         };
 
     public:
-        std::vector<VkPipelineShaderStageCreateInfo> ray_gen_stages;
+        VkPipelineShaderStageCreateInfo              ray_gen_stage;
         std::vector<VkPipelineShaderStageCreateInfo> hit_stages;
         std::vector<VkPipelineShaderStageCreateInfo> miss_stages;
         std::vector<HitGroupDesc>                    hit_groups;
         std::vector<std::string>                     entry_point_names;
 
         Desc();
-        Desc& add_ray_gen_group(ShaderModule::Ptr shader, const std::string& entry_point);
+        Desc& set_ray_gen_stage(ShaderModule::Ptr shader, const std::string& entry_point);
         Desc& add_hit_group(ShaderModule::Ptr  closest_hit_shader,
                             const std::string& closest_hit_entry_point,
                             ShaderModule::Ptr  any_hit_shader           = nullptr,
@@ -687,9 +693,10 @@ public:
     static ShaderBindingTable::Ptr create(Backend::Ptr backend, Desc desc);
 
     inline const std::vector<VkPipelineShaderStageCreateInfo>&      stages() { return m_stages; }
-    inline const std::vector<VkRayTracingShaderGroupCreateInfoKHR>& groups() { return m_groups; }
-    VkDeviceSize                                                    hit_group_offset();
-    VkDeviceSize                                                    miss_group_offset();
+    inline const VkRayTracingShaderGroupCreateInfoKHR&              ray_gen_group() { return m_ray_gen_group; }
+    inline const std::vector<VkRayTracingShaderGroupCreateInfoKHR>& miss_groups() { return m_miss_groups; }
+    inline const std::vector<VkRayTracingShaderGroupCreateInfoKHR>& hit_groups() { return m_hit_groups; }
+
 
     ~ShaderBindingTable();
 
@@ -697,12 +704,11 @@ private:
     ShaderBindingTable(Backend::Ptr backend, Desc desc);
 
 private:
-    VkDeviceSize                                      m_ray_gen_size;
-    VkDeviceSize                                      m_hit_group_size;
-    VkDeviceSize                                      m_miss_group_size;
     std::vector<std::string>                          m_entry_point_names;
     std::vector<VkPipelineShaderStageCreateInfo>      m_stages;
-    std::vector<VkRayTracingShaderGroupCreateInfoKHR> m_groups;
+    VkRayTracingShaderGroupCreateInfoKHR              m_ray_gen_group;
+    std::vector<VkRayTracingShaderGroupCreateInfoKHR> m_miss_groups;
+    std::vector<VkRayTracingShaderGroupCreateInfoKHR> m_hit_groups;
 };
 
 class RayTracingPipeline : public Object
@@ -725,9 +731,12 @@ public:
 
     static RayTracingPipeline::Ptr create(Backend::Ptr backend, Desc desc);
 
-    inline ShaderBindingTable::Ptr shader_binding_table() { return m_sbt; }
-    inline Buffer::Ptr             shader_binding_table_buffer() { return m_vk_buffer; }
-    inline const VkPipeline&       handle() { return m_vk_pipeline; }
+    inline ShaderBindingTable::Ptr         shader_binding_table() { return m_sbt; }
+    inline Buffer::Ptr                     shader_binding_table_buffer() { return m_vk_buffer; }
+    inline VkStridedDeviceAddressRegionKHR ray_gen_region() { return m_ray_gen_region; }
+    inline VkStridedDeviceAddressRegionKHR hit_group_region() { return m_hit_group_region; }
+    inline VkStridedDeviceAddressRegionKHR miss_group_region() { return m_miss_group_region; }
+    inline const VkPipeline&               handle() { return m_vk_pipeline; }
 
     ~RayTracingPipeline();
 
@@ -737,9 +746,12 @@ private:
     RayTracingPipeline(Backend::Ptr backend, Desc desc);
 
 private:
-    VkPipeline              m_vk_pipeline;
-    vk::Buffer::Ptr         m_vk_buffer;
-    ShaderBindingTable::Ptr m_sbt;
+    VkPipeline                      m_vk_pipeline;
+    vk::Buffer::Ptr                 m_vk_buffer;
+    ShaderBindingTable::Ptr         m_sbt;
+    VkStridedDeviceAddressRegionKHR m_ray_gen_region;
+    VkStridedDeviceAddressRegionKHR m_hit_group_region;
+    VkStridedDeviceAddressRegionKHR m_miss_group_region;
 };
 
 class AccelerationStructure : public Object
@@ -766,6 +778,7 @@ public:
 
     static AccelerationStructure::Ptr create(Backend::Ptr backend, Desc desc);
 
+    inline Buffer::Ptr                              buffer() { return m_buffer; }
     inline VkAccelerationStructureCreateInfoKHR&    info() { return m_vk_acceleration_structure_info; };
     inline const VkAccelerationStructureKHR&        handle() { return m_vk_acceleration_structure; }
     inline VkDeviceAddress                          device_address() { return m_device_address; }
@@ -952,6 +965,8 @@ public:
 
     ~Fence();
 
+    void wait_for_completion();
+
     void set_name(const std::string& name);
 
     inline const VkFence& handle() { return m_vk_fence; }
@@ -1049,7 +1064,7 @@ public:
     ~BatchUploader();
 
     void upload_buffer_data(Buffer::Ptr buffer, void* data, const size_t& offset, const size_t& size);
-    void upload_image_data(Image::Ptr image, void* data, const std::vector<size_t>& mip_level_sizes, VkImageLayout src_layout = VK_IMAGE_LAYOUT_UNDEFINED, VkImageLayout dst_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    void upload_image_data(Image::Ptr image, void* data, const std::vector<size_t>& mip_level_sizes, VkImageLayout dst_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     void build_blas(AccelerationStructure::Ptr acceleration_structure, const std::vector<VkAccelerationStructureGeometryKHR>& geometries, const std::vector<VkAccelerationStructureBuildRangeInfoKHR> build_ranges);
     void submit();
 
@@ -1066,19 +1081,10 @@ private:
 
 namespace utilities
 {
-extern void     set_image_layout(VkCommandBuffer         cmdbuffer,
-                                 VkImage                 image,
-                                 VkImageLayout           oldImageLayout,
-                                 VkImageLayout           newImageLayout,
-                                 VkImageSubresourceRange subresourceRange,
-                                 VkPipelineStageFlags    srcStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                                 VkPipelineStageFlags    dstStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
 extern void     blitt_image(vk::CommandBuffer::Ptr cmd_buf,
                             vk::Image::Ptr         src,
                             vk::Image::Ptr         dst,
-                            VkImageLayout          src_img_src_layout,
                             VkImageLayout          src_img_dst_layout,
-                            VkImageLayout          dst_img_src_layout,
                             VkImageLayout          dst_img_dst_layout,
                             VkImageAspectFlags     aspect_flags,
                             VkFilter               filter);

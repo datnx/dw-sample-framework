@@ -2,11 +2,13 @@
 #include <logger.h>
 #include <macros.h>
 #include <fstream>
-#include <extensions_vk.h>
 #include <glm.hpp>
 #include <utility.h>
+#include "aftermath_callbacks.h"
 
 #define VMA_IMPLEMENTATION
+#define VMA_STATIC_VULKAN_FUNCTIONS 0
+#define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
 #include <vk_mem_alloc.h>
 
 #define GLFW_INCLUDE_VULKAN
@@ -16,9 +18,14 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
+#include <GFSDK_Aftermath_GpuCrashDump.h>
+
 #if defined(DWSF_VULKAN)
 
 //#define ENABLE_GPU_ASSISTED_VALIDATION
+
+#undef min
+#undef max
 
 namespace dw
 {
@@ -39,6 +46,15 @@ const char* kDeviceTypes[] = {
     "VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU",
     "VK_PHYSICAL_DEVICE_TYPE_CPU"
 };
+
+// -----------------------------------------------------------------------------------------------------------------------------------
+
+#    define VENDOR_ID_AMD 0x1002
+#    define VENDOR_ID_IMAGINATION 0x1010
+#    define VENDOR_ID_NVIDIA 0x10DE
+#    define VENDOR_ID_ARM 0x13B5
+#    define VENDOR_ID_QUALCOMM 0x5143
+#    define VENDOR_ID_INTEL 0x8086
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
@@ -74,68 +90,6 @@ const char* get_vendor_name(uint32_t id)
             return kVendorNames[0];
     }
 }
-
-#    define MAX_DESCRIPTOR_POOL_THREADS 32
-#    define MAX_COMMAND_THREADS 32
-#    define MAX_THREAD_LOCAL_COMMAND_BUFFERS 8
-
-struct ThreadLocalCommandBuffers
-{
-    CommandPool::Ptr   command_pool[Backend::kMaxFramesInFlight];
-    CommandBuffer::Ptr command_buffers[Backend::kMaxFramesInFlight][MAX_THREAD_LOCAL_COMMAND_BUFFERS];
-    uint32_t           allocated_buffers = 0;
-
-    ThreadLocalCommandBuffers(Backend::Ptr backend, uint32_t queue_family)
-    {
-        for (int i = 0; i < Backend::kMaxFramesInFlight; i++)
-        {
-            command_pool[i] = CommandPool::create(backend, queue_family);
-
-            for (int j = 0; j < MAX_THREAD_LOCAL_COMMAND_BUFFERS; j++)
-                command_buffers[i][j] = CommandBuffer::create(backend, command_pool[i]);
-        }
-    }
-
-    ~ThreadLocalCommandBuffers()
-    {
-    }
-
-    void reset(uint32_t frame_index)
-    {
-        allocated_buffers = 0;
-        command_pool[frame_index]->reset();
-    }
-
-    CommandBuffer::Ptr allocate(uint32_t frame_index, bool begin)
-    {
-        if (allocated_buffers >= MAX_THREAD_LOCAL_COMMAND_BUFFERS)
-        {
-            DW_LOG_FATAL("(Vulkan) Max thread local command buffer count reached!");
-            throw std::runtime_error("(Vulkan) Max thread local command buffer count reached!");
-        }
-
-        auto cmd_buf = command_buffers[frame_index][allocated_buffers++];
-
-        if (begin)
-        {
-            VkCommandBufferBeginInfo begin_info;
-            DW_ZERO_MEMORY(begin_info);
-
-            begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-
-            vkBeginCommandBuffer(cmd_buf->handle(), &begin_info);
-        }
-
-        return cmd_buf;
-    }
-};
-
-std::atomic<uint32_t>                                   g_thread_counter = 0;
-thread_local uint32_t                                   g_thread_idx     = g_thread_counter++;
-thread_local std::shared_ptr<ThreadLocalCommandBuffers> g_graphics_command_buffers[MAX_COMMAND_THREADS];
-thread_local std::shared_ptr<ThreadLocalCommandBuffers> g_compute_command_buffers[MAX_COMMAND_THREADS];
-thread_local std::shared_ptr<ThreadLocalCommandBuffers> g_transfer_command_buffers[MAX_COMMAND_THREADS];
-thread_local DescriptorPool::Ptr                        g_descriptor_pools[MAX_DESCRIPTOR_POOL_THREADS];
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
@@ -293,30 +247,7 @@ Image::Image(Backend::Ptr backend, VkImageType type, uint32_t width, uint32_t he
 
     if (data)
     {
-        CommandBuffer::Ptr cmd_buf = backend->allocate_graphics_command_buffer(true);
-
-        VkImageSubresourceRange subresource_range;
-        DW_ZERO_MEMORY(subresource_range);
-
-        subresource_range.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-        subresource_range.baseMipLevel   = 0;
-        subresource_range.levelCount     = m_mip_levels;
-        subresource_range.layerCount     = m_array_size;
-        subresource_range.baseArrayLayer = 0;
-
-        // Image barrier for optimal image (target)
-        // Optimal image will be used as destination for the copy
-        utilities::set_image_layout(cmd_buf->handle(),
-                                    m_vk_image,
-                                    VK_IMAGE_LAYOUT_UNDEFINED,
-                                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                    subresource_range);
-
-        vkEndCommandBuffer(cmd_buf->handle());
-
-        backend->flush_graphics({ cmd_buf });
-
-        upload_data(0, 0, data, size, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        upload_data(0, 0, data, size, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
         if (m_mip_levels > 1)
             generate_mipmaps();
@@ -346,7 +277,7 @@ Image::~Image()
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
-void Image::upload_data(int array_index, int mip_level, void* data, size_t size, VkImageLayout src_layout, VkImageLayout dst_layout)
+void Image::upload_data(int array_index, int mip_level, void* data, size_t size, VkImageLayout dst_layout)
 {
     auto backend = m_vk_backend.lock();
 
@@ -375,16 +306,9 @@ void Image::upload_data(int array_index, int mip_level, void* data, size_t size,
 
     CommandBuffer::Ptr cmd_buf = backend->allocate_graphics_command_buffer(true);
 
-    if (src_layout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
-    {
-        // Image barrier for optimal image (target)
-        // Optimal image will be used as destination for the copy
-        utilities::set_image_layout(cmd_buf->handle(),
-                                    m_vk_image,
-                                    src_layout,
-                                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                    subresource_range);
-    }
+    backend->use_resource(VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, m_vk_image, subresource_range, m_array_size, m_mip_levels);
+        
+    backend->flush_barriers(cmd_buf);
 
     // Copy mip levels from staging buffer
     vkCmdCopyBufferToImage(cmd_buf->handle(),
@@ -394,15 +318,9 @@ void Image::upload_data(int array_index, int mip_level, void* data, size_t size,
                            1,
                            &buffer_copy_region);
 
-    if (dst_layout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
-    {
-        // Change texture image layout to shader read after all mip levels have been copied
-        utilities::set_image_layout(cmd_buf->handle(),
-                                    m_vk_image,
-                                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                    dst_layout,
-                                    subresource_range);
-    }
+    backend->use_resource(VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_SHADER_READ_BIT, dst_layout, m_vk_image, subresource_range, m_array_size, m_mip_levels);
+
+    backend->flush_barriers(cmd_buf);
 
     vkEndCommandBuffer(cmd_buf->handle());
 
@@ -411,8 +329,10 @@ void Image::upload_data(int array_index, int mip_level, void* data, size_t size,
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
-void Image::generate_mipmaps(std::shared_ptr<CommandBuffer> cmd_buf, VkImageLayout src_layout, VkImageLayout dst_layout, VkImageAspectFlags aspect_flags, VkFilter filter)
+void Image::generate_mipmaps(std::shared_ptr<CommandBuffer> cmd_buf, VkImageLayout dst_layout, VkImageAspectFlags aspect_flags, VkFilter filter)
 {
+    auto backend = m_vk_backend.lock();
+
     VkImageSubresourceRange initial_subresource_range;
     DW_ZERO_MEMORY(initial_subresource_range);
 
@@ -422,11 +342,9 @@ void Image::generate_mipmaps(std::shared_ptr<CommandBuffer> cmd_buf, VkImageLayo
     initial_subresource_range.baseArrayLayer = 0;
     initial_subresource_range.baseMipLevel   = 1;
 
-    utilities::set_image_layout(cmd_buf->handle(),
-                                m_vk_image,
-                                VK_IMAGE_LAYOUT_UNDEFINED,
-                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                initial_subresource_range);
+    backend->use_resource(VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, m_vk_image, initial_subresource_range, m_array_size, m_mip_levels);
+        
+    backend->flush_barriers(cmd_buf);
 
     VkImageSubresourceRange subresource_range;
     DW_ZERO_MEMORY(subresource_range);
@@ -445,19 +363,9 @@ void Image::generate_mipmaps(std::shared_ptr<CommandBuffer> cmd_buf, VkImageLayo
             subresource_range.baseMipLevel   = mip_idx - 1;
             subresource_range.baseArrayLayer = arr_idx;
 
-            VkImageLayout layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            backend->use_resource(VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR, VK_ACCESS_2_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, m_vk_image, subresource_range, m_array_size, m_mip_levels);
 
-            if (mip_idx == 1)
-                layout = src_layout;
-
-            if (layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
-            {
-                utilities::set_image_layout(cmd_buf->handle(),
-                                            m_vk_image,
-                                            layout,
-                                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                            subresource_range);
-            }
+            backend->flush_barriers(cmd_buf);
 
             VkImageBlit blit                   = {};
             blit.srcOffsets[0]                 = { 0, 0, 0 };
@@ -482,11 +390,9 @@ void Image::generate_mipmaps(std::shared_ptr<CommandBuffer> cmd_buf, VkImageLayo
                            &blit,
                            filter);
 
-            utilities::set_image_layout(cmd_buf->handle(),
-                                        m_vk_image,
-                                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                        dst_layout,
-                                        subresource_range);
+            backend->use_resource(VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_SHADER_READ_BIT, dst_layout, m_vk_image, subresource_range, m_array_size, m_mip_levels);
+
+            backend->flush_barriers(cmd_buf);
 
             if (mip_width > 1) mip_width /= 2;
             if (mip_height > 1) mip_height /= 2;
@@ -494,23 +400,21 @@ void Image::generate_mipmaps(std::shared_ptr<CommandBuffer> cmd_buf, VkImageLayo
 
         subresource_range.baseMipLevel = m_mip_levels - 1;
 
-        utilities::set_image_layout(cmd_buf->handle(),
-                                    m_vk_image,
-                                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                    dst_layout,
-                                    subresource_range);
+        backend->use_resource(VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_SHADER_READ_BIT, dst_layout, m_vk_image, subresource_range, m_array_size, m_mip_levels);
+
+        backend->flush_barriers(cmd_buf);
     }
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
-void Image::generate_mipmaps(VkImageLayout src_layout, VkImageLayout dst_layout, VkImageAspectFlags aspect_flags, VkFilter filter)
+void Image::generate_mipmaps(VkImageLayout dst_layout, VkImageAspectFlags aspect_flags, VkFilter filter)
 {
     auto backend = m_vk_backend.lock();
 
     CommandBuffer::Ptr cmd_buf = backend->allocate_graphics_command_buffer(true);
 
-    generate_mipmaps(cmd_buf, src_layout, dst_layout, aspect_flags, filter);
+    generate_mipmaps(cmd_buf, dst_layout, aspect_flags, filter);
 
     vkEndCommandBuffer(cmd_buf->handle());
 
@@ -581,116 +485,6 @@ void ImageView::set_name(const std::string& name)
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------
-
-RenderPass::Ptr RenderPass::create(Backend::Ptr backend, std::vector<VkAttachmentDescription> attachment_descs, std::vector<VkSubpassDescription> subpass_descs, std::vector<VkSubpassDependency> subpass_deps)
-{
-    return std::shared_ptr<RenderPass>(new RenderPass(backend, attachment_descs, subpass_descs, subpass_deps));
-}
-
-// -----------------------------------------------------------------------------------------------------------------------------------
-
-RenderPass::RenderPass(Backend::Ptr backend, std::vector<VkAttachmentDescription> attachment_descs, std::vector<VkSubpassDescription> subpass_descs, std::vector<VkSubpassDependency> subpass_deps) :
-    Object(backend)
-{
-    VkRenderPassCreateInfo render_pass_info;
-    DW_ZERO_MEMORY(render_pass_info);
-
-    render_pass_info.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    render_pass_info.attachmentCount = attachment_descs.size();
-    render_pass_info.pAttachments    = attachment_descs.data();
-    render_pass_info.subpassCount    = subpass_descs.size();
-    render_pass_info.pSubpasses      = subpass_descs.data();
-    render_pass_info.dependencyCount = subpass_deps.size();
-    render_pass_info.pDependencies   = subpass_deps.data();
-
-    if (vkCreateRenderPass(backend->device(), &render_pass_info, nullptr, &m_vk_render_pass) != VK_SUCCESS)
-    {
-        DW_LOG_FATAL("(Vulkan) Failed to create Render Pass.");
-        throw std::runtime_error("(Vulkan) Failed to create Render Pass.");
-    }
-}
-
-// -----------------------------------------------------------------------------------------------------------------------------------
-
-RenderPass::~RenderPass()
-{
-    if (m_vk_backend.expired())
-    {
-        DW_LOG_FATAL("(Vulkan) Destructing after Device.");
-        throw std::runtime_error("(Vulkan) Destructing after Device.");
-    }
-
-    auto backend = m_vk_backend.lock();
-
-    vkDestroyRenderPass(backend->device(), m_vk_render_pass, nullptr);
-}
-
-// -----------------------------------------------------------------------------------------------------------------------------------
-
-void RenderPass::set_name(const std::string& name)
-{
-    auto backend = m_vk_backend.lock();
-    utilities::set_object_name(backend->device(), (uint64_t)m_vk_render_pass, name, VK_OBJECT_TYPE_RENDER_PASS);
-}
-
-// -----------------------------------------------------------------------------------------------------------------------------------
-
-Framebuffer::Ptr Framebuffer::create(Backend::Ptr backend, RenderPass::Ptr render_pass, std::vector<ImageView::Ptr> views, uint32_t width, uint32_t height, uint32_t layers)
-{
-    return std::shared_ptr<Framebuffer>(new Framebuffer(backend, render_pass, views, width, height, layers));
-}
-
-// -----------------------------------------------------------------------------------------------------------------------------------
-
-Framebuffer::Framebuffer(Backend::Ptr backend, RenderPass::Ptr render_pass, std::vector<ImageView::Ptr> views, uint32_t width, uint32_t height, uint32_t layers) :
-    Object(backend)
-{
-    std::vector<VkImageView> attachments(views.size());
-
-    for (int i = 0; i < attachments.size(); i++)
-        attachments[i] = views[i]->handle();
-
-    VkFramebufferCreateInfo frameBuffer_create_info;
-    DW_ZERO_MEMORY(frameBuffer_create_info);
-
-    frameBuffer_create_info.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-    frameBuffer_create_info.pNext           = NULL;
-    frameBuffer_create_info.renderPass      = render_pass->handle();
-    frameBuffer_create_info.attachmentCount = views.size();
-    frameBuffer_create_info.pAttachments    = attachments.data();
-    frameBuffer_create_info.width           = width;
-    frameBuffer_create_info.height          = height;
-    frameBuffer_create_info.layers          = layers;
-
-    if (vkCreateFramebuffer(backend->device(), &frameBuffer_create_info, nullptr, &m_vk_framebuffer) != VK_SUCCESS)
-    {
-        DW_LOG_FATAL("(Vulkan) Failed to create Framebuffer.");
-        throw std::runtime_error("(Vulkan) Failed to create Framebuffer.");
-    }
-}
-
-// -----------------------------------------------------------------------------------------------------------------------------------
-
-Framebuffer::~Framebuffer()
-{
-    if (m_vk_backend.expired())
-    {
-        DW_LOG_FATAL("(Vulkan) Destructing after Device.");
-        throw std::runtime_error("(Vulkan) Destructing after Device.");
-    }
-
-    auto backend = m_vk_backend.lock();
-
-    vkDestroyFramebuffer(backend->device(), m_vk_framebuffer, nullptr);
-}
-
-// -----------------------------------------------------------------------------------------------------------------------------------
-
-void Framebuffer::set_name(const std::string& name)
-{
-    auto backend = m_vk_backend.lock();
-    utilities::set_object_name(backend->device(), (uint64_t)m_vk_framebuffer, name, VK_OBJECT_TYPE_FRAMEBUFFER);
-}
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
@@ -980,13 +774,6 @@ void CommandBuffer::set_name(const std::string& name)
 {
     auto backend = m_vk_backend.lock();
     utilities::set_object_name(backend->device(), (uint64_t)m_vk_command_buffer, name, VK_OBJECT_TYPE_COMMAND_BUFFER);
-}
-
-// -----------------------------------------------------------------------------------------------------------------------------------
-
-void CommandBuffer::reset()
-{
-    vkResetCommandBuffer(m_vk_command_buffer, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------
@@ -1656,6 +1443,39 @@ GraphicsPipeline::Desc::Desc()
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
+GraphicsPipeline::Desc& GraphicsPipeline::Desc::add_color_attachment_format(VkFormat format)
+{
+    if (dynamic_state_count == 8)
+    {
+        DW_LOG_FATAL("(Vulkan) Max color attachment count reached.");
+        throw std::runtime_error("(Vulkan) Max color attachment count reached.");
+    }
+
+    color_attachment_formats[color_attachment_format_count++] = format;
+
+    return *this;
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------
+
+GraphicsPipeline::Desc& GraphicsPipeline::Desc::set_depth_attachment_format(VkFormat format)
+{
+    depth_attachment_format = format;
+
+    return *this;
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------
+
+GraphicsPipeline::Desc& GraphicsPipeline::Desc::set_stencil_attachment_format(VkFormat format)
+{
+    stencil_attachment_format = format;
+
+    return *this;
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------
+
 GraphicsPipeline::Desc& GraphicsPipeline::Desc::add_dynamic_state(const VkDynamicState& state)
 {
     if (dynamic_state_count == 32)
@@ -1762,14 +1582,6 @@ GraphicsPipeline::Desc& GraphicsPipeline::Desc::set_pipeline_layout(const std::s
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
-GraphicsPipeline::Desc& GraphicsPipeline::Desc::set_render_pass(const RenderPass::Ptr& render_pass)
-{
-    create_info.renderPass = render_pass->handle();
-    return *this;
-}
-
-// -----------------------------------------------------------------------------------------------------------------------------------
-
 GraphicsPipeline::Desc& GraphicsPipeline::Desc::set_sub_pass(const uint32_t& subpass)
 {
     create_info.subpass = subpass;
@@ -1794,7 +1606,7 @@ GraphicsPipeline::Desc& GraphicsPipeline::Desc::set_base_pipeline_index(const in
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
-GraphicsPipeline::Ptr GraphicsPipeline::create_for_post_process(Backend::Ptr backend, std::string vs, std::string fs, std::shared_ptr<PipelineLayout> pipeline_layout, RenderPass::Ptr render_pass)
+GraphicsPipeline::Ptr GraphicsPipeline::create_for_post_process(Backend::Ptr backend, std::string vs, std::string fs, std::shared_ptr<PipelineLayout> pipeline_layout, uint32_t attachment_count, VkFormat attachment_formats[])
 {
     // ---------------------------------------------------------------------------
     // Create shader modules
@@ -1911,10 +1723,15 @@ GraphicsPipeline::Ptr GraphicsPipeline::create_for_post_process(Backend::Ptr bac
         .add_dynamic_state(VK_DYNAMIC_STATE_SCISSOR);
 
     // ---------------------------------------------------------------------------
-    // Create pipeline
+    // Create rendering state
     // ---------------------------------------------------------------------------
 
-    pso_desc.set_render_pass(render_pass);
+    for (uint32_t i = 0; i < attachment_count; i++)
+        pso_desc.add_color_attachment_format(attachment_formats[i]);
+
+    // ---------------------------------------------------------------------------
+    // Create pipeline
+    // ---------------------------------------------------------------------------
 
     return vk::GraphicsPipeline::create(backend, pso_desc);
 }
@@ -1931,11 +1748,24 @@ GraphicsPipeline::Ptr GraphicsPipeline::create(Backend::Ptr backend, Desc desc)
 GraphicsPipeline::GraphicsPipeline(Backend::Ptr backend, Desc desc) :
     Object(backend)
 {
+    VkPipelineRenderingCreateInfoKHR rendering_create_info {};
+
     desc.create_info.pStages             = &desc.shader_stages[0];
     desc.create_info.stageCount          = desc.shader_stage_count;
     desc.dynamic_state.dynamicStateCount = desc.dynamic_state_count;
     desc.dynamic_state.pDynamicStates    = &desc.dynamic_states[0];
     desc.create_info.pDynamicState       = &desc.dynamic_state;
+
+    if (!desc.create_info.renderPass)
+    {
+        rendering_create_info.sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
+        rendering_create_info.colorAttachmentCount    = desc.color_attachment_format_count;
+        rendering_create_info.pColorAttachmentFormats = &desc.color_attachment_formats[0];
+        rendering_create_info.depthAttachmentFormat   = desc.depth_attachment_format;
+        rendering_create_info.stencilAttachmentFormat = desc.stencil_attachment_format;
+
+        desc.create_info.pNext = &rendering_create_info;
+    }
 
     if (vkCreateGraphicsPipelines(backend->device(), nullptr, 1, &desc.create_info, nullptr, &m_vk_pipeline) != VK_SUCCESS)
     {
@@ -2060,7 +1890,6 @@ void ComputePipeline::set_name(const std::string& name)
 ShaderBindingTable::Desc::Desc()
 {
     entry_point_names.reserve(32);
-    ray_gen_stages.reserve(32);
     hit_stages.reserve(32);
     miss_stages.reserve(32);
     hit_groups.reserve(32);
@@ -2068,7 +1897,7 @@ ShaderBindingTable::Desc::Desc()
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
-ShaderBindingTable::Desc& ShaderBindingTable::Desc::add_ray_gen_group(ShaderModule::Ptr shader, const std::string& entry_point)
+ShaderBindingTable::Desc& ShaderBindingTable::Desc::set_ray_gen_stage(ShaderModule::Ptr shader, const std::string& entry_point)
 {
     VkPipelineShaderStageCreateInfo stage;
     DW_ZERO_MEMORY(stage);
@@ -2080,7 +1909,7 @@ ShaderBindingTable::Desc& ShaderBindingTable::Desc::add_ray_gen_group(ShaderModu
     stage.stage  = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
     stage.pName  = entry_point_names.back().c_str();
 
-    ray_gen_stages.push_back(stage);
+    ray_gen_stage = stage;
 
     return *this;
 }
@@ -2177,20 +2006,6 @@ ShaderBindingTable::Ptr ShaderBindingTable::create(Backend::Ptr backend, Desc de
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
-VkDeviceSize ShaderBindingTable::hit_group_offset()
-{
-    return m_ray_gen_size + m_miss_group_size;
-}
-
-// -----------------------------------------------------------------------------------------------------------------------------------
-
-VkDeviceSize ShaderBindingTable::miss_group_offset()
-{
-    return m_ray_gen_size;
-}
-
-// -----------------------------------------------------------------------------------------------------------------------------------
-
 ShaderBindingTable::~ShaderBindingTable()
 {
 }
@@ -2205,26 +2020,24 @@ ShaderBindingTable::ShaderBindingTable(Backend::Ptr backend, Desc desc) :
     auto& rt_pipeline_props = backend->ray_tracing_pipeline_properties();
 
     // Ray gen shaders
-    for (auto& stage : desc.ray_gen_stages)
-    {
-        VkRayTracingShaderGroupCreateInfoKHR group_info;
-        DW_ZERO_MEMORY(group_info);
+    VkRayTracingShaderGroupCreateInfoKHR group_info;
+    DW_ZERO_MEMORY(group_info);
 
-        m_entry_point_names.push_back(std::string(stage.pName));
+    m_entry_point_names.push_back(std::string(desc.ray_gen_stage.pName));
 
-        stage.pName = m_entry_point_names[m_entry_point_names.size() - 1].c_str();
+    desc.ray_gen_stage.pName = m_entry_point_names[m_entry_point_names.size() - 1].c_str();
 
-        group_info.sType              = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
-        group_info.pNext              = nullptr;
-        group_info.type               = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
-        group_info.generalShader      = m_stages.size();
-        group_info.closestHitShader   = VK_SHADER_UNUSED_KHR;
-        group_info.anyHitShader       = VK_SHADER_UNUSED_KHR;
-        group_info.intersectionShader = VK_SHADER_UNUSED_KHR;
+    group_info.sType              = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
+    group_info.pNext              = nullptr;
+    group_info.type               = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
+    group_info.generalShader      = m_stages.size();
+    group_info.closestHitShader   = VK_SHADER_UNUSED_KHR;
+    group_info.anyHitShader       = VK_SHADER_UNUSED_KHR;
+    group_info.intersectionShader = VK_SHADER_UNUSED_KHR;
 
-        m_stages.push_back(stage);
-        m_groups.push_back(group_info);
-    }
+    m_stages.push_back(desc.ray_gen_stage);
+
+    m_ray_gen_group = group_info;
 
     // Ray miss shaders
     for (auto& stage : desc.miss_stages)
@@ -2244,7 +2057,7 @@ ShaderBindingTable::ShaderBindingTable(Backend::Ptr backend, Desc desc) :
         stage.pName = m_entry_point_names[m_entry_point_names.size() - 1].c_str();
 
         m_stages.push_back(stage);
-        m_groups.push_back(group_info);
+        m_miss_groups.push_back(group_info);
     }
 
     // Ray hit shaders
@@ -2292,14 +2105,8 @@ ShaderBindingTable::ShaderBindingTable(Backend::Ptr backend, Desc desc) :
             m_stages.push_back(*group.intersection_stage);
         }
 
-        m_groups.push_back(group_info);
+        m_hit_groups.push_back(group_info);
     }
-
-    uint32_t group_size_aligned = utilities::aligned_size(rt_pipeline_props.shaderGroupHandleSize, rt_pipeline_props.shaderGroupBaseAlignment);
-
-    m_ray_gen_size    = desc.ray_gen_stages.size() * group_size_aligned;
-    m_hit_group_size  = desc.hit_groups.size() * group_size_aligned;
-    m_miss_group_size = desc.miss_stages.size() * group_size_aligned;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------
@@ -2316,15 +2123,7 @@ RayTracingPipeline::Desc::Desc()
 
 RayTracingPipeline::Desc& RayTracingPipeline::Desc::set_shader_binding_table(ShaderBindingTable::Ptr table)
 {
-    sbt                                                             = table;
-    const std::vector<VkPipelineShaderStageCreateInfo>&      stages = table->stages();
-    const std::vector<VkRayTracingShaderGroupCreateInfoKHR>& groups = table->groups();
-
-    create_info.groupCount = groups.size();
-    create_info.pGroups    = groups.data();
-
-    create_info.stageCount = stages.size();
-    create_info.pStages    = stages.data();
+    sbt = table;
 
     return *this;
 }
@@ -2400,8 +2199,20 @@ RayTracingPipeline::RayTracingPipeline(Backend::Ptr backend, Desc desc) :
 {
     m_sbt = desc.sbt;
 
-    desc.create_info.pGroups = m_sbt->groups().data();
-    desc.create_info.pStages = m_sbt->stages().data();
+    std::vector<VkRayTracingShaderGroupCreateInfoKHR> groups;
+
+    groups.push_back(m_sbt->ray_gen_group());
+
+    for (const auto& miss_group : m_sbt->miss_groups())
+        groups.push_back(miss_group);
+
+    for (const auto& hit_group : m_sbt->hit_groups())
+        groups.push_back(hit_group);
+
+    desc.create_info.groupCount = groups.size();
+    desc.create_info.pGroups    = groups.data();
+    desc.create_info.stageCount = m_sbt->stages().size();
+    desc.create_info.pStages    = m_sbt->stages().data();
 
     if (vkCreateRayTracingPipelinesKHR(backend->device(), VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &desc.create_info, VK_NULL_HANDLE, &m_vk_pipeline) != VK_SUCCESS)
     {
@@ -2411,29 +2222,64 @@ RayTracingPipeline::RayTracingPipeline(Backend::Ptr backend, Desc desc) :
 
     const auto& rt_pipeline_props = backend->ray_tracing_pipeline_properties();
 
-    uint32_t group_handle_size  = rt_pipeline_props.shaderGroupHandleSize;
-    uint32_t group_size_aligned = utilities::aligned_size(rt_pipeline_props.shaderGroupHandleSize, rt_pipeline_props.shaderGroupBaseAlignment);
-    size_t   sbt_size           = m_sbt->groups().size() * group_size_aligned;
+    uint32_t handle_size         = rt_pipeline_props.shaderGroupHandleSize;
+    uint32_t handle_aligned_size = utilities::aligned_size(rt_pipeline_props.shaderGroupHandleSize, rt_pipeline_props.shaderGroupHandleAlignment);
+
+    m_ray_gen_region.stride = utilities::aligned_size(handle_aligned_size, rt_pipeline_props.shaderGroupBaseAlignment);
+    m_ray_gen_region.size   = m_ray_gen_region.stride;
+                             
+    m_miss_group_region.stride = handle_aligned_size;
+    m_miss_group_region.size   = utilities::aligned_size(m_sbt->miss_groups().size() * handle_aligned_size, rt_pipeline_props.shaderGroupBaseAlignment);
+                             
+    m_hit_group_region.stride = handle_aligned_size;
+    m_hit_group_region.size   = utilities::aligned_size(m_sbt->hit_groups().size() * handle_aligned_size, rt_pipeline_props.shaderGroupBaseAlignment);
+
+    const size_t sbt_size = m_ray_gen_region.size + m_miss_group_region.size + m_hit_group_region.size;
 
     m_vk_buffer = vk::Buffer::create_with_alignment(backend, VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, sbt_size, rt_pipeline_props.shaderGroupBaseAlignment, VMA_MEMORY_USAGE_CPU_TO_GPU, VMA_ALLOCATION_CREATE_MAPPED_BIT);
 
-    std::vector<uint8_t> scratch_mem(sbt_size);
+    m_ray_gen_region.deviceAddress    = m_vk_buffer->device_address();
+    m_miss_group_region.deviceAddress = m_vk_buffer->device_address() + m_ray_gen_region.size;
+    m_hit_group_region.deviceAddress  = m_vk_buffer->device_address() + m_ray_gen_region.size + m_miss_group_region.size;
+ 
+    const size_t scratch_size = handle_size * groups.size();
 
-    if (vkGetRayTracingShaderGroupHandlesKHR(backend->device(), m_vk_pipeline, 0, m_sbt->groups().size(), sbt_size, scratch_mem.data()) != VK_SUCCESS)
+    std::vector<uint8_t> scratch_mem(scratch_size);
+
+    if (vkGetRayTracingShaderGroupHandlesKHR(backend->device(), m_vk_pipeline, 0, groups.size(), scratch_size, scratch_mem.data()) != VK_SUCCESS)
     {
         DW_LOG_FATAL("(Vulkan) Failed to get Shader Group handles.");
         throw std::runtime_error("(Vulkan) Failed to get Shader Group handles.");
     }
 
-    uint8_t* src_ptr = scratch_mem.data();
-    uint8_t* dst_ptr = (uint8_t*)m_vk_buffer->mapped_ptr();
+    uint32_t handle_idx = 0;
 
-    for (int i = 0; i < m_sbt->groups().size(); i++)
+    // Helper to retrieve the handle data
+    auto get_handle = [&](int i) { 
+        return scratch_mem.data() + i * handle_size; 
+    };
+
+    uint8_t* sbt_base_ptr    = (uint8_t*)m_vk_buffer->mapped_ptr();
+    uint8_t* sbt_current_ptr = sbt_base_ptr;
+
+    // Raygen
+    memcpy(sbt_current_ptr, get_handle(handle_idx++), handle_size);
+
+    // Miss
+    sbt_current_ptr = sbt_base_ptr + m_ray_gen_region.size;
+
+    for (uint32_t i = 0; i < m_sbt->miss_groups().size(); i++)
     {
-        memcpy(dst_ptr, src_ptr, group_handle_size);
+        memcpy(sbt_current_ptr, get_handle(handle_idx++), handle_size);
+        sbt_current_ptr += m_miss_group_region.stride;
+    }
+    // Hit
+    sbt_current_ptr = sbt_base_ptr + m_ray_gen_region.size + m_miss_group_region.size;
 
-        dst_ptr += group_size_aligned;
-        src_ptr += group_size_aligned;
+    for (uint32_t i = 0; i < m_sbt->hit_groups().size(); i++)
+    {
+        memcpy(sbt_current_ptr, get_handle(handle_idx++), handle_size);
+        sbt_current_ptr += m_hit_group_region.stride;
     }
 }
 
@@ -2950,6 +2796,16 @@ Fence::~Fence()
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
+void Fence::wait_for_completion()
+{
+    auto backend = m_vk_backend.lock();
+
+    vkWaitForFences(backend->device(), 1, &m_vk_fence, VK_TRUE, UINT64_MAX);
+    vkResetFences(backend->device(), 1, &m_vk_fence);
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------
+
 void Fence::set_name(const std::string& name)
 {
     auto backend = m_vk_backend.lock();
@@ -3170,7 +3026,7 @@ void BatchUploader::upload_buffer_data(Buffer::Ptr buffer, void* data, const siz
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
-void BatchUploader::upload_image_data(Image::Ptr image, void* data, const std::vector<size_t>& mip_level_sizes, VkImageLayout src_layout, VkImageLayout dst_layout)
+void BatchUploader::upload_image_data(Image::Ptr image, void* data, const std::vector<size_t>& mip_level_sizes, VkImageLayout dst_layout)
 {
     if (!m_backend.expired())
     {
@@ -3224,16 +3080,9 @@ void BatchUploader::upload_image_data(Image::Ptr image, void* data, const std::v
         subresource_range.layerCount     = image->array_size();
         subresource_range.baseArrayLayer = 0;
 
-        if (src_layout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
-        {
-            // Image barrier for optimal image (target)
-            // Optimal image will be used as destination for the copy
-            utilities::set_image_layout(m_cmd->handle(),
-                                        image->handle(),
-                                        src_layout,
-                                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                        subresource_range);
-        }
+        backend->use_resource(VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, image, subresource_range);
+        
+        backend->flush_barriers(m_cmd);
 
         // Copy mip levels from staging buffer
         vkCmdCopyBufferToImage(m_cmd->handle(),
@@ -3243,15 +3092,9 @@ void BatchUploader::upload_image_data(Image::Ptr image, void* data, const std::v
                                copy_regions.size(),
                                copy_regions.data());
 
-        if (dst_layout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
-        {
-            // Change texture image layout to shader read after all mip levels have been copied
-            utilities::set_image_layout(m_cmd->handle(),
-                                        image->handle(),
-                                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                        dst_layout,
-                                        subresource_range);
-        }
+        backend->use_resource(VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_SHADER_READ_BIT, dst_layout, image, subresource_range);
+
+        backend->flush_barriers(m_cmd);
     }
 }
 
@@ -3302,7 +3145,7 @@ void BatchUploader::submit()
             for (int i = 0; i < m_blas_build_requests.size(); i++)
                 scratch_buffer_size = std::max(scratch_buffer_size, m_blas_build_requests[i].acceleration_structure->build_sizes().buildScratchSize);
 
-            blas_scratch_buffer = vk::Buffer::create(backend, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, scratch_buffer_size, VMA_MEMORY_USAGE_GPU_ONLY, 0);
+            blas_scratch_buffer = vk::Buffer::create_with_alignment(backend, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, scratch_buffer_size, backend->acceleration_structure_properties().minAccelerationStructureScratchOffsetAlignment, VMA_MEMORY_USAGE_GPU_ONLY, 0);
 
             for (int i = 0; i < m_blas_build_requests.size(); i++)
             {
@@ -3314,6 +3157,7 @@ void BatchUploader::submit()
                 build_info.sType                     = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
                 build_info.type                      = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
                 build_info.flags                     = m_blas_build_requests[i].acceleration_structure->flags();
+                build_info.mode                      = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
                 build_info.srcAccelerationStructure  = VK_NULL_HANDLE;
                 build_info.dstAccelerationStructure  = m_blas_build_requests[i].acceleration_structure->handle();
                 build_info.geometryCount             = (uint32_t)m_blas_build_requests[i].geometries.size();
@@ -3347,9 +3191,9 @@ void BatchUploader::add_staging_buffer(const size_t& size)
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
-Backend::Ptr Backend::create(GLFWwindow* window, bool vsync, bool srgb_swapchain, bool enable_validation_layers, bool require_ray_tracing, std::vector<const char*> additional_device_extensions)
+Backend::Ptr Backend::create(GLFWwindow* window, bool vsync, bool srgb_swapchain, bool enable_validation_layers, bool enable_nsight_aftermath, bool require_ray_tracing, std::vector<const char*> additional_device_extensions)
 {
-    std::shared_ptr<Backend> backend = std::shared_ptr<Backend>(new Backend(window, vsync, srgb_swapchain, enable_validation_layers, require_ray_tracing, additional_device_extensions));
+    std::shared_ptr<Backend> backend = std::shared_ptr<Backend>(new Backend(window, vsync, srgb_swapchain, enable_validation_layers, enable_nsight_aftermath, require_ray_tracing, additional_device_extensions));
     backend->initialize();
 
     return backend;
@@ -3357,20 +3201,26 @@ Backend::Ptr Backend::create(GLFWwindow* window, bool vsync, bool srgb_swapchain
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
-Backend::Backend(GLFWwindow* window, bool vsync, bool srgb_swapchain, bool enable_validation_layers, bool require_ray_tracing, std::vector<const char*> additional_device_extensions) :
+Backend::Backend(GLFWwindow* window, bool vsync, bool srgb_swapchain, bool enable_validation_layers, bool enable_nsight_aftermath, bool require_ray_tracing, std::vector<const char*> additional_device_extensions) :
     m_vsync(vsync), m_srgb_swapchain(srgb_swapchain), m_window(window)
 {
     m_ray_tracing_enabled = require_ray_tracing;
 
-    VkApplicationInfo appInfo;
-    DW_ZERO_MEMORY(appInfo);
+    if (volkInitialize() != VK_SUCCESS)
+    {
+        DW_LOG_FATAL("Failed to initialize Volk.");
+        throw std::runtime_error("Failed to initialize Volk.");
+    }
 
-    appInfo.sType              = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    appInfo.pApplicationName   = "dwSampleFramework";
-    appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
-    appInfo.pEngineName        = "dwSampleFramework";
-    appInfo.engineVersion      = VK_MAKE_VERSION(1, 0, 0);
-    appInfo.apiVersion         = VK_API_VERSION_1_2;
+    VkApplicationInfo app_info;
+    DW_ZERO_MEMORY(app_info);
+
+    app_info.sType              = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    app_info.pApplicationName   = "dwSampleFramework";
+    app_info.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
+    app_info.pEngineName        = "dwSampleFramework";
+    app_info.engineVersion      = VK_MAKE_VERSION(1, 0, 0);
+    app_info.apiVersion         = VK_API_VERSION_1_3;
 
     std::vector<const char*> extensions = required_extensions(enable_validation_layers);
 
@@ -3380,7 +3230,7 @@ Backend::Backend(GLFWwindow* window, bool vsync, bool srgb_swapchain, bool enabl
     DW_ZERO_MEMORY(create_info);
 
     create_info.sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-    create_info.pApplicationInfo        = &appInfo;
+    create_info.pApplicationInfo        = &app_info;
     create_info.enabledExtensionCount   = extensions.size();
     create_info.ppEnabledExtensionNames = extensions.data();
 
@@ -3388,23 +3238,25 @@ Backend::Backend(GLFWwindow* window, bool vsync, bool srgb_swapchain, bool enabl
 
     if (enable_validation_layers)
     {
-        VkValidationFeatureEnableEXT enabled_features[] = { VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_EXT };
+        VkValidationFeatureEnableEXT enabled_features[] = { VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT, VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_EXT };
 
         VkValidationFeaturesEXT validation_features;
         DW_ZERO_MEMORY(validation_features);
 
-        validation_features.sType                         = VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT;
+        validation_features.sType = VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT;
+#if defined(ENABLE_GPU_ASSISTED_VALIDATION)
+        validation_features.enabledValidationFeatureCount = 2;
+#else
         validation_features.enabledValidationFeatureCount = 1;
-        validation_features.pEnabledValidationFeatures    = enabled_features;
+#endif
+        validation_features.pEnabledValidationFeatures = enabled_features;
 
         DW_ZERO_MEMORY(debug_create_info);
         create_info.enabledLayerCount   = static_cast<uint32_t>(kValidationLayers.size());
         create_info.ppEnabledLayerNames = kValidationLayers.data();
 
         debug_create_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
-#    if defined(ENABLE_GPU_ASSISTED_VALIDATION)
         debug_create_info.pNext = &validation_features;
-#    endif
         debug_create_info.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
         debug_create_info.messageType     = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
         debug_create_info.pfnUserCallback = debug_callback;
@@ -3422,6 +3274,8 @@ Backend::Backend(GLFWwindow* window, bool vsync, bool srgb_swapchain, bool enabl
         DW_LOG_FATAL("(Vulkan) Failed to create Vulkan instance.");
         throw std::runtime_error("(Vulkan) Failed to create Vulkan instance.");
     }
+
+    volkLoadInstance(m_vk_instance);
 
     if (enable_validation_layers && create_debug_utils_messenger(m_vk_instance, &debug_create_info, nullptr, &m_vk_debug_messenger) != VK_SUCCESS)
         DW_LOG_FATAL("(Vulkan) Failed to create Vulkan debug messenger.");
@@ -3451,6 +3305,8 @@ Backend::Backend(GLFWwindow* window, bool vsync, bool srgb_swapchain, bool enabl
     device_extensions.push_back(VK_KHR_MAINTENANCE3_EXTENSION_NAME);
     device_extensions.push_back(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
     device_extensions.push_back(VK_EXT_SCALAR_BLOCK_LAYOUT_EXTENSION_NAME);
+    device_extensions.push_back(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
+    device_extensions.push_back(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
 
     for (auto ext : additional_device_extensions)
         device_extensions.push_back(ext);
@@ -3461,17 +3317,23 @@ Backend::Backend(GLFWwindow* window, bool vsync, bool srgb_swapchain, bool enabl
         throw std::runtime_error("(Vulkan) Failed to find a suitable GPU.");
     }
 
-    if (!create_logical_device(device_extensions, require_ray_tracing))
+    if (!create_logical_device(device_extensions, require_ray_tracing, enable_nsight_aftermath))
     {
         DW_LOG_FATAL("(Vulkan) Failed to create logical device.");
         throw std::runtime_error("(Vulkan) Failed to create logical device.");
     }
+
+    VmaVulkanFunctions vulkan_functions = {};
+
+    vulkan_functions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
+    vulkan_functions.vkGetDeviceProcAddr   = vkGetDeviceProcAddr;
 
     VmaAllocatorCreateInfo allocator_info = {};
     allocator_info.flags                  = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
     allocator_info.physicalDevice         = m_vk_physical_device;
     allocator_info.device                 = m_vk_device;
     allocator_info.instance               = m_vk_instance;
+    allocator_info.pVulkanFunctions       = (const VmaVulkanFunctions*)&vulkan_functions;
 
     if (vmaCreateAllocator(&allocator_info, &m_vma_allocator) != VK_SUCCESS)
     {
@@ -3479,19 +3341,16 @@ Backend::Backend(GLFWwindow* window, bool vsync, bool srgb_swapchain, bool enabl
         throw std::runtime_error("(Vulkan) Failed to create Allocator.");
     }
 
-    load_VK_EXTENSION_SUBSET(m_vk_instance, vkGetInstanceProcAddr, m_vk_device, vkGetDeviceProcAddr);
+    m_buffer_memory_barriers.reserve(256);
+    m_image_memory_barriers.reserve(256);
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
 Backend::~Backend()
 {
-    while (!m_deletion_queue.empty())
-    {
-        auto front = m_deletion_queue.front();
-        wait_for_frame(front.second);
-        m_deletion_queue.pop_front();
-    }
+    m_image_usage_info.clear();
+    m_buffer_usage_info.clear();
 
     m_default_cubemap_image_view.reset();
     m_default_cubemap_image.reset();
@@ -3499,26 +3358,19 @@ Backend::~Backend()
     m_trilinear_sampler.reset();
     m_nearest_sampler.reset();
 
-    for (int i = 0; i < MAX_COMMAND_THREADS; i++)
-    {
-        g_graphics_command_buffers[i].reset();
-        g_compute_command_buffers[i].reset();
-        g_transfer_command_buffers[i].reset();
-    }
+    m_graphics_command_buffers.clear();
+    m_compute_command_buffers.clear();
+    m_transfer_command_buffers.clear();
 
-    for (int i = 0; i < MAX_DESCRIPTOR_POOL_THREADS; i++)
-        g_descriptor_pools[i].reset();
+    m_graphics_command_pools.clear();
+    m_compute_command_pools.clear();
+    m_transfer_command_pools.clear();
+
+    m_descriptor_pool.reset();
 
     for (int i = 0; i < m_swap_chain_images.size(); i++)
-    {
-        m_swap_chain_framebuffers[i].reset();
         m_swap_chain_image_views[i].reset();
-    }
 
-    for (int i = 0; i < m_in_flight_fences.size(); i++)
-        m_in_flight_fences[i].reset();
-
-    m_swap_chain_render_pass.reset();
     m_swap_chain_depth_view.reset();
     m_swap_chain_depth.reset();
 
@@ -3577,14 +3429,25 @@ void Backend::initialize()
         .add_pool_size(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 16)
         .add_pool_size(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 32);
 
-    for (int i = 0; i < MAX_DESCRIPTOR_POOL_THREADS; i++)
-        g_descriptor_pools[i] = DescriptorPool::create(shared_from_this(), dp_desc);
+    m_descriptor_pool = DescriptorPool::create(shared_from_this(), dp_desc);
 
-    for (int i = 0; i < MAX_COMMAND_THREADS; i++)
+    m_graphics_command_pools.resize(m_swap_chain_images.size());
+    m_compute_command_pools.resize(m_swap_chain_images.size());
+    m_transfer_command_pools.resize(m_swap_chain_images.size());
+
+    m_graphics_command_buffers.resize(m_swap_chain_images.size());
+    m_compute_command_buffers.resize(m_swap_chain_images.size());
+    m_transfer_command_buffers.resize(m_swap_chain_images.size());
+
+    for (int i = 0; i < m_swap_chain_images.size(); i++)
     {
-        g_graphics_command_buffers[i] = std::make_shared<ThreadLocalCommandBuffers>(shared_from_this(), m_selected_queues.graphics_queue_index);
-        g_compute_command_buffers[i]  = std::make_shared<ThreadLocalCommandBuffers>(shared_from_this(), m_selected_queues.compute_queue_index);
-        g_transfer_command_buffers[i] = std::make_shared<ThreadLocalCommandBuffers>(shared_from_this(), m_selected_queues.transfer_queue_index);
+        m_graphics_command_pools[i] = CommandPool::create(shared_from_this(), m_selected_queues.graphics_queue_index);
+        m_compute_command_pools[i] = CommandPool::create(shared_from_this(), m_selected_queues.compute_queue_index);
+        m_transfer_command_pools[i] = CommandPool::create(shared_from_this(), m_selected_queues.transfer_queue_index);
+
+        m_graphics_command_buffers[i] = CommandBuffer::create(shared_from_this(), m_graphics_command_pools[i]);
+        m_compute_command_buffers[i]  = CommandBuffer::create(shared_from_this(), m_compute_command_pools[i]);
+        m_transfer_command_buffers[i] = CommandBuffer::create(shared_from_this(), m_transfer_command_pools[i]);
     }
 
     Sampler::Desc sampler_desc;
@@ -3614,7 +3477,8 @@ void Backend::initialize()
     m_trilinear_sampler->set_name("Trilinear Sampler");
 
     sampler_desc.mag_filter = VK_FILTER_NEAREST;
-    sampler_desc.min_filter = VK_FILTER_NEAREST;
+    sampler_desc.min_filter  = VK_FILTER_NEAREST;
+    sampler_desc.mipmap_mode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
 
     m_nearest_sampler = Sampler::create(shared_from_this(), sampler_desc);
     m_nearest_sampler->set_name("Nearest Sampler");
@@ -3647,88 +3511,340 @@ void Backend::initialize()
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
-std::shared_ptr<DescriptorSet> Backend::allocate_descriptor_set(std::shared_ptr<DescriptorSetLayout> layout)
-{
-    return DescriptorSet::create(shared_from_this(), layout, g_descriptor_pools[g_thread_idx]);
-}
-
-// -----------------------------------------------------------------------------------------------------------------------------------
-
 std::shared_ptr<CommandBuffer> Backend::allocate_graphics_command_buffer(bool begin)
 {
-    return g_graphics_command_buffers[g_thread_idx]->allocate(m_current_frame, begin);
+    auto cmd = m_graphics_command_buffers[m_frame_idx % m_graphics_command_buffers.size()];
+
+    if (begin)
+    {
+        VkCommandBufferBeginInfo begin_info;
+        DW_ZERO_MEMORY(begin_info);
+
+        begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+
+        vkBeginCommandBuffer(cmd->handle(), &begin_info);
+    }
+
+    return cmd;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
 std::shared_ptr<CommandBuffer> Backend::allocate_compute_command_buffer(bool begin)
 {
-    return g_compute_command_buffers[g_thread_idx]->allocate(m_current_frame, begin);
+    auto cmd = m_compute_command_buffers[m_frame_idx % m_compute_command_buffers.size()];
+
+    if (begin)
+    {
+        VkCommandBufferBeginInfo begin_info;
+        DW_ZERO_MEMORY(begin_info);
+
+        begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+
+        vkBeginCommandBuffer(cmd->handle(), &begin_info);
+    }
+
+    return cmd;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
 std::shared_ptr<CommandBuffer> Backend::allocate_transfer_command_buffer(bool begin)
 {
-    return g_transfer_command_buffers[g_thread_idx]->allocate(m_current_frame, begin);
+    auto cmd = m_transfer_command_buffers[m_frame_idx % m_transfer_command_buffers.size()];
+
+    if (begin)
+    {
+        VkCommandBufferBeginInfo begin_info;
+        DW_ZERO_MEMORY(begin_info);
+
+        begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+
+        vkBeginCommandBuffer(cmd->handle(), &begin_info);
+    }
+
+    return cmd;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
-std::shared_ptr<CommandPool> Backend::thread_local_graphics_command_pool()
+void Backend::reset_command_pools()
 {
-    return g_graphics_command_buffers[g_thread_idx]->command_pool[m_current_frame];
+    graphics_command_pool()->reset();
+    compute_command_pool()->reset();
+    transfer_command_pool()->reset();
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
-std::shared_ptr<CommandPool> Backend::thread_local_compute_command_pool()
+std::shared_ptr<CommandPool> Backend::graphics_command_pool()
 {
-    return g_compute_command_buffers[g_thread_idx]->command_pool[m_current_frame];
+    return m_graphics_command_pools[m_frame_idx % m_transfer_command_buffers.size()];
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
-std::shared_ptr<CommandPool> Backend::thread_local_transfer_command_pool()
+std::shared_ptr<CommandPool> Backend::compute_command_pool()
 {
-    return g_transfer_command_buffers[g_thread_idx]->command_pool[m_current_frame];
+    return m_compute_command_pools[m_frame_idx % m_transfer_command_buffers.size()];
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
-std::shared_ptr<DescriptorPool> Backend::thread_local_descriptor_pool()
+std::shared_ptr<CommandPool> Backend::transfer_command_pool()
 {
-    return g_descriptor_pools[g_thread_idx];
+    return m_transfer_command_pools[m_frame_idx % m_transfer_command_buffers.size()];
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------
+
+std::shared_ptr<DescriptorSet> Backend::allocate_descriptor_set(std::shared_ptr<DescriptorSetLayout> layout)
+{
+    return DescriptorSet::create(shared_from_this(), layout, m_descriptor_pool);
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------
+
+std::shared_ptr<DescriptorPool> Backend::descriptor_pool()
+{
+    return m_descriptor_pool;
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------
+
+void Backend::use_resource(VkPipelineStageFlags2          _stage,
+                           VkAccessFlags2                 _access,
+                           const std::shared_ptr<Buffer>& _buffer,
+                           size_t                         _offset,
+                           size_t                         _size)
+{
+    use_resource(_stage, _access, _buffer->handle(), _offset, _size);
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------
+
+void Backend::use_resource(VkPipelineStageFlags2         _stage,
+                           VkAccessFlags2                _access,
+                           VkImageLayout                 _layout,
+                           const std::shared_ptr<Image>& _image,
+                           VkImageSubresourceRange       _range)
+{
+    use_resource(_stage, _access, _layout, _image->handle(), _range, _image->array_size(), _image->mip_levels());
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------
+
+void Backend::use_resource(VkPipelineStageFlags2   _stage,
+                           VkAccessFlags2          _access,
+                           VkImageLayout           _layout,
+                           VkImage                 _image,
+                           VkImageSubresourceRange _range,
+                           uint32_t                _num_layers,
+                           uint32_t                _num_levels)
+{
+    VkImageMemoryBarrier2 barrier = {};
+
+    barrier.sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    barrier.srcStageMask     = VK_PIPELINE_STAGE_2_NONE;
+    barrier.srcAccessMask    = VK_ACCESS_2_NONE;
+    barrier.dstStageMask     = _stage;
+    barrier.dstAccessMask    = _access;
+    barrier.oldLayout        = VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.newLayout        = _layout;
+    barrier.image            = _image;
+    barrier.subresourceRange = _range;
+
+    ImageUsageInfo new_usage = {};
+
+    new_usage.stage          = barrier.dstStageMask;
+    new_usage.access         = barrier.dstAccessMask;
+    new_usage.layout         = barrier.newLayout;
+    new_usage.last_frame_idx = m_frame_idx;
+
+    bool is_swap_chain_image = false;
+
+    for (auto& swap_chain_image : m_swap_chain_images)
+    {
+        if (_image == swap_chain_image->handle())
+        {
+            is_swap_chain_image = true;
+            break;
+        }
+    }
+
+    if (m_image_usage_info.find((uint64_t)_image) != m_image_usage_info.end())
+    {
+        std::vector<ImageUsageInfo>& usages = m_image_usage_info[(uint64_t)_image];
+
+        // If the resource size was changed for some reason, resize the vector and reset the old usages.
+        if (usages.size() != (_num_levels * _num_layers))
+        {
+            usages.resize(_num_levels * _num_layers);
+
+            for (uint32_t layer_idx = 0; layer_idx < _range.layerCount; layer_idx++)
+            {
+                for (uint32_t level_idx = 0; level_idx < _range.levelCount; level_idx++)
+                {
+                    const uint32_t idx = (_num_levels * (_range.baseArrayLayer + layer_idx)) + (_range.baseMipLevel + level_idx);
+
+                    ImageUsageInfo default_usage = {};
+
+                    default_usage.stage          = VK_PIPELINE_STAGE_2_NONE;
+                    default_usage.access         = VK_ACCESS_2_NONE;
+                    default_usage.layout         = VK_IMAGE_LAYOUT_UNDEFINED;
+                    default_usage.last_frame_idx = 0;
+
+                    usages[idx] = default_usage;
+                }
+            }
+        }
+
+        VkImageLayout first_old_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        for (uint32_t layer_idx = 0; layer_idx < _range.layerCount; layer_idx++)
+        {
+            for (uint32_t level_idx = 0; level_idx < _range.levelCount; level_idx++)
+            {
+                const uint32_t idx = (_num_levels * (_range.baseArrayLayer + layer_idx)) + (_range.baseMipLevel + level_idx);
+
+                ImageUsageInfo& old_usage = usages[idx];
+
+                // Add up all the old stage masks and access masks.
+                barrier.srcStageMask |= old_usage.stage;
+                barrier.srcAccessMask |= old_usage.access;
+
+                // Use the first encountered old layout as the overall old layout.
+                barrier.oldLayout = old_usage.layout;
+
+                if (is_swap_chain_image && old_usage.last_frame_idx != m_frame_idx)
+                    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                else
+                {
+                    // Make sure the other layers and levels have the same old layout.
+                    // If not, we've done something wrong.
+                    if (first_old_layout == VK_IMAGE_LAYOUT_UNDEFINED)
+                        first_old_layout = old_usage.layout;
+                    else if (first_old_layout != old_usage.layout)
+                        throw std::runtime_error("(Vulkan) Attempting an Image Layout Transition across multiple subresources that have different old layouts! Transition them to a common layout before attempting this!");
+                }
+                
+                old_usage = new_usage;
+            }
+        }
+    }
+    else
+    {
+        std::vector<ImageUsageInfo> usages;
+
+        usages.resize(_num_levels * _num_layers);
+
+        for (uint32_t layer_idx = 0; layer_idx < _range.layerCount; layer_idx++)
+        {
+            for (uint32_t level_idx = 0; level_idx < _range.levelCount; level_idx++)
+            {
+                const uint32_t idx = (_num_levels * (_range.baseArrayLayer + layer_idx)) + (_range.baseMipLevel + level_idx);
+
+                usages[idx] = new_usage;
+            }
+        }
+
+        m_image_usage_info[(uint64_t)_image] = usages;
+    }
+
+    m_image_memory_barriers.emplace_back(barrier);
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------
+
+void Backend::use_resource(VkPipelineStageFlags2 _stage,
+                           VkAccessFlags2        _access,
+                           VkBuffer              _buffer,
+                           size_t                _offset,
+                           size_t                _size)
+{
+    VkBufferMemoryBarrier2 barrier = {};
+
+    barrier.sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
+    barrier.srcStageMask  = VK_PIPELINE_STAGE_2_NONE;
+    barrier.srcAccessMask = VK_ACCESS_2_NONE;
+    barrier.dstStageMask  = _stage;
+    barrier.dstAccessMask = _access;
+    barrier.buffer        = _buffer;
+    barrier.offset        = _offset;
+    barrier.size          = _size == 0 ? VK_WHOLE_SIZE : _size;
+
+    BufferUsageInfo new_usage = {};
+
+    new_usage.stage  = barrier.dstStageMask;
+    new_usage.access = barrier.dstAccessMask;
+
+    if (m_buffer_usage_info.find((uint64_t)_buffer) != m_buffer_usage_info.end())
+    {
+        BufferUsageInfo& old_usage = m_buffer_usage_info[(uint64_t)_buffer];
+
+        barrier.srcStageMask  = old_usage.stage;
+        barrier.srcAccessMask = old_usage.access;
+
+        old_usage = new_usage;
+    }
+    else
+        m_buffer_usage_info[(uint64_t)_buffer] = new_usage;
+
+    m_buffer_memory_barriers.emplace_back(barrier);
+}
+
+// -----------------------------------------------------------------------------------------------------------------------------------
+
+void Backend::flush_barriers(const std::shared_ptr<CommandBuffer>& _cmd_buf)
+{
+    if (m_buffer_memory_barriers.size() > 0 || m_image_memory_barriers.size() > 0)
+    {
+        VkDependencyInfo dependency_info = {};
+
+        dependency_info.sType                    = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dependency_info.dependencyFlags          = VK_DEPENDENCY_BY_REGION_BIT;
+        dependency_info.memoryBarrierCount       = 0;
+        dependency_info.pMemoryBarriers          = nullptr;
+        dependency_info.bufferMemoryBarrierCount = m_buffer_memory_barriers.size();
+        dependency_info.pBufferMemoryBarriers    = m_buffer_memory_barriers.data();
+        dependency_info.imageMemoryBarrierCount  = m_image_memory_barriers.size();
+        dependency_info.pImageMemoryBarriers     = m_image_memory_barriers.data();
+
+        vkCmdPipelineBarrier2(_cmd_buf->handle(), &dependency_info);
+    }
+
+    m_buffer_memory_barriers.clear();
+    m_image_memory_barriers.clear();
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
 void Backend::submit_graphics(const std::vector<std::shared_ptr<CommandBuffer>>& cmd_bufs,
                               const std::vector<std::shared_ptr<Semaphore>>&     wait_semaphores,
-                              const std::vector<VkPipelineStageFlags>&           wait_stages,
-                              const std::vector<std::shared_ptr<Semaphore>>&     signal_semaphores)
+                              const std::vector<std::shared_ptr<Semaphore>>&     signal_semaphores,
+                              const std::shared_ptr<Fence>&                      signal_fence)
 {
-    submit(m_vk_graphics_queue, cmd_bufs, wait_semaphores, wait_stages, signal_semaphores);
+    submit(m_vk_graphics_queue, cmd_bufs, wait_semaphores, signal_semaphores, signal_fence);
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
 void Backend::submit_compute(const std::vector<std::shared_ptr<CommandBuffer>>& cmd_bufs,
                              const std::vector<std::shared_ptr<Semaphore>>&     wait_semaphores,
-                             const std::vector<VkPipelineStageFlags>&           wait_stages,
-                             const std::vector<std::shared_ptr<Semaphore>>&     signal_semaphores)
+                             const std::vector<std::shared_ptr<Semaphore>>&     signal_semaphores,
+                             const std::shared_ptr<Fence>&                      signal_fence)
 {
-    submit(m_vk_compute_queue, cmd_bufs, wait_semaphores, wait_stages, signal_semaphores);
+    submit(m_vk_compute_queue, cmd_bufs, wait_semaphores, signal_semaphores, signal_fence);
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
 void Backend::submit_transfer(const std::vector<std::shared_ptr<CommandBuffer>>& cmd_bufs,
                               const std::vector<std::shared_ptr<Semaphore>>&     wait_semaphores,
-                              const std::vector<VkPipelineStageFlags>&           wait_stages,
-                              const std::vector<std::shared_ptr<Semaphore>>&     signal_semaphores)
+                              const std::vector<std::shared_ptr<Semaphore>>&     signal_semaphores,
+                              const std::shared_ptr<Fence>&                      signal_fence)
 {
-    submit(m_vk_transfer_queue, cmd_bufs, wait_semaphores, wait_stages, signal_semaphores);
+    submit(m_vk_transfer_queue, cmd_bufs, wait_semaphores, signal_semaphores, signal_fence);
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------
@@ -3737,8 +3853,7 @@ void Backend::flush_graphics(const std::vector<std::shared_ptr<CommandBuffer>>& 
 {
     flush(m_vk_graphics_queue, cmd_bufs);
 
-    for (int i = 0; i < MAX_COMMAND_THREADS; i++)
-        g_graphics_command_buffers[i]->reset(m_current_frame);
+    m_graphics_command_pools[m_frame_idx % m_graphics_command_pools.size()]->reset();
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------
@@ -3747,8 +3862,7 @@ void Backend::flush_compute(const std::vector<std::shared_ptr<CommandBuffer>>& c
 {
     flush(m_vk_compute_queue, cmd_bufs);
 
-    for (int i = 0; i < MAX_COMMAND_THREADS; i++)
-        g_compute_command_buffers[i]->reset(m_current_frame);
+    m_compute_command_pools[m_frame_idx % m_compute_command_pools.size()]->reset();
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------
@@ -3757,8 +3871,7 @@ void Backend::flush_transfer(const std::vector<std::shared_ptr<CommandBuffer>>& 
 {
     flush(m_vk_transfer_queue, cmd_bufs);
 
-    for (int i = 0; i < MAX_COMMAND_THREADS; i++)
-        g_transfer_command_buffers[i]->reset(m_current_frame);
+    m_transfer_command_pools[m_frame_idx % m_transfer_command_pools.size()]->reset();
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------
@@ -3766,47 +3879,63 @@ void Backend::flush_transfer(const std::vector<std::shared_ptr<CommandBuffer>>& 
 void Backend::submit(VkQueue                                            queue,
                      const std::vector<std::shared_ptr<CommandBuffer>>& cmd_bufs,
                      const std::vector<std::shared_ptr<Semaphore>>&     wait_semaphores,
-                     const std::vector<VkPipelineStageFlags>&           wait_stages,
-                     const std::vector<std::shared_ptr<Semaphore>>&     signal_semaphores)
+                     const std::vector<std::shared_ptr<Semaphore>>&     signal_semaphores,
+                     const std::shared_ptr<Fence>&                      signal_fence)
 {
-    VkSemaphore vk_wait_semaphores[16];
+    VkSemaphoreSubmitInfo vk_wait_semaphores[16];
 
     for (int i = 0; i < wait_semaphores.size(); i++)
-        vk_wait_semaphores[i] = wait_semaphores[i]->handle();
+    {
+        VkSemaphoreSubmitInfo& info = vk_wait_semaphores[i];
 
-    VkSemaphore vk_signal_semaphores[16];
+        info.sType         = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+        info.pNext         = nullptr;
+        info.semaphore     = wait_semaphores[i]->handle();
+        info.value         = 0;
+        info.stageMask     = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        info.deviceIndex   = 0;
+    }
 
-    for (int i = 0; i < signal_semaphores.size(); i++)
-        vk_signal_semaphores[i] = signal_semaphores[i]->handle();
-
-    VkCommandBuffer vk_cmd_bufs[32];
+    VkCommandBufferSubmitInfo vk_cmd_bufs[32];
 
     for (int i = 0; i < cmd_bufs.size(); i++)
-        vk_cmd_bufs[i] = cmd_bufs[i]->handle();
+    {
+        VkCommandBufferSubmitInfo& info = vk_cmd_bufs[i];
 
-    VkPipelineStageFlags vk_wait_stages[16];
+        info.sType         = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+        info.pNext         = nullptr;
+        info.commandBuffer = cmd_bufs[i]->handle();
+        info.deviceMask    = 0;
+    }
 
-    for (int i = 0; i < wait_semaphores.size(); i++)
-        vk_wait_stages[i] = wait_stages[i];
+    VkSemaphoreSubmitInfo vk_signal_semaphores[16];
 
-    VkSubmitInfo submit_info;
-    DW_ZERO_MEMORY(submit_info);
+    for (int i = 0; i < signal_semaphores.size(); i++)
+    {
+        VkSemaphoreSubmitInfo& info = vk_signal_semaphores[i];
 
-    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        info.sType       = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+        info.pNext       = nullptr;
+        info.semaphore   = signal_semaphores[i]->handle();
+        info.value       = 0;
+        info.stageMask   = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        info.deviceIndex = 0;
+    }
 
-    submit_info.waitSemaphoreCount = wait_semaphores.size();
-    submit_info.pWaitSemaphores    = vk_wait_semaphores;
-    submit_info.pWaitDstStageMask  = vk_wait_stages;
+    VkSubmitInfo2 submit_info = {};
 
-    submit_info.commandBufferCount = cmd_bufs.size();
-    submit_info.pCommandBuffers    = &vk_cmd_bufs[0];
+    submit_info.sType                    = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+    submit_info.pNext                    = nullptr;
+    submit_info.flags                    = 0;
+    submit_info.waitSemaphoreInfoCount   = wait_semaphores.size();
+    submit_info.pWaitSemaphoreInfos      = vk_wait_semaphores;
+    submit_info.commandBufferInfoCount   = cmd_bufs.size();
+    submit_info.pCommandBufferInfos      = vk_cmd_bufs;
+    submit_info.signalSemaphoreInfoCount = signal_semaphores.size();
+    submit_info.pSignalSemaphoreInfos    = vk_signal_semaphores;
 
-    submit_info.signalSemaphoreCount = signal_semaphores.size();
-    submit_info.pSignalSemaphores    = vk_signal_semaphores;
-
-    vkResetFences(m_vk_device, 1, &m_in_flight_fences[m_current_frame]->handle());
-
-    VkResult result = vkQueueSubmit(queue, 1, &submit_info, m_in_flight_fences[m_current_frame]->handle());
+    // Submit to queue
+    VkResult result = vkQueueSubmit2(queue, 1, &submit_info, signal_fence->handle());
 
     if (result != VK_SUCCESS)
     {
@@ -3851,29 +3980,11 @@ void Backend::flush(VkQueue queue, const std::vector<std::shared_ptr<CommandBuff
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
-void Backend::acquire_next_swap_chain_image(const std::shared_ptr<Semaphore>& semaphore)
+bool Backend::acquire_next_swap_chain_image(const std::shared_ptr<Semaphore>& semaphore)
 {
-    vkWaitForFences(m_vk_device, 1, &m_in_flight_fences[m_current_frame]->handle(), VK_TRUE, UINT64_MAX);
-
-    for (int i = 0; i < MAX_COMMAND_THREADS; i++)
-    {
-        g_graphics_command_buffers[i]->reset(m_current_frame);
-        g_compute_command_buffers[i]->reset(m_current_frame);
-        g_transfer_command_buffers[i]->reset(m_current_frame);
-    }
-
     VkResult result = vkAcquireNextImageKHR(m_vk_device, m_vk_swap_chain, UINT64_MAX, semaphore->handle(), VK_NULL_HANDLE, &m_image_index);
 
-    if (result == VK_ERROR_OUT_OF_DATE_KHR)
-    {
-        recreate_swapchain(m_vsync);
-        return;
-    }
-    else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
-    {
-        DW_LOG_FATAL("(Vulkan) Failed to acquire swap chain image!");
-        throw std::runtime_error("(Vulkan) Failed to acquire swap chain image!");
-    }
+    return result == VK_SUCCESS;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------
@@ -3903,39 +4014,23 @@ void Backend::present(const std::vector<std::shared_ptr<Semaphore>>& semaphores)
         throw std::runtime_error("failed to present swap chain image!");
     }
 
-    m_current_frame = (m_current_frame + 1) % kMaxFramesInFlight;
-}
+    m_frame_idx++;
 
-// -----------------------------------------------------------------------------------------------------------------------------------
-
-bool Backend::is_frame_done(uint32_t idx)
-{
-    if (idx < kMaxFramesInFlight)
-        return vkGetFenceStatus(m_vk_device, m_in_flight_fences[idx]->handle()) == VK_SUCCESS;
-    else
-        return false;
-}
-
-// -----------------------------------------------------------------------------------------------------------------------------------
-
-void Backend::wait_for_frame(uint32_t idx)
-{
-    if (idx < kMaxFramesInFlight)
-        vkWaitForFences(m_vk_device, 1, &m_in_flight_fences[idx]->handle(), VK_TRUE, 100000000000);
+    m_current_frame = m_frame_idx % kMaxFramesInFlight;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
 Image::Ptr Backend::swapchain_image()
 {
-    return m_swap_chain_images[m_current_frame];
+    return m_swap_chain_images[m_image_index];
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
 ImageView::Ptr Backend::swapchain_image_view()
 {
-    return m_swap_chain_image_views[m_current_frame];
+    return m_swap_chain_image_views[m_image_index];
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------
@@ -3957,20 +4052,6 @@ std::shared_ptr<Image> Backend::swapchain_depth_image()
 std::shared_ptr<ImageView> Backend::swapchain_depth_image_view()
 {
     return m_swap_chain_depth_view;
-}
-
-// -----------------------------------------------------------------------------------------------------------------------------------
-
-Framebuffer::Ptr Backend::swapchain_framebuffer()
-{
-    return m_swap_chain_framebuffers[m_current_frame];
-}
-
-// -----------------------------------------------------------------------------------------------------------------------------------
-
-RenderPass::Ptr Backend::swapchain_render_pass()
-{
-    return m_swap_chain_render_pass;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------
@@ -4080,29 +4161,6 @@ VkFormat Backend::find_supported_format(const std::vector<VkFormat>& candidates,
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
-void Backend::process_deletion_queue()
-{
-    while (!m_deletion_queue.empty())
-    {
-        auto front = m_deletion_queue.front();
-
-        if (is_frame_done(front.second))
-            m_deletion_queue.pop_front();
-        else
-            return;
-    }
-}
-
-// -----------------------------------------------------------------------------------------------------------------------------------
-
-void Backend::queue_object_deletion(std::shared_ptr<Object> object)
-{
-    if (object)
-        m_deletion_queue.push_back({ object, m_current_frame });
-}
-
-// -----------------------------------------------------------------------------------------------------------------------------------
-
 VkFormat Backend::find_depth_format()
 {
     return find_supported_format({ VK_FORMAT_D32_SFLOAT, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT }, VK_IMAGE_TILING_OPTIMAL, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT);
@@ -4201,8 +4259,7 @@ std::vector<const char*> Backend::required_extensions(bool enable_validation_lay
 
     std::vector<const char*> extensions(glfw_extensions, glfw_extensions + glfw_extension_count);
 
-    if (enable_validation_layers)
-        extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+    extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 
     return extensions;
 }
@@ -4300,30 +4357,21 @@ bool Backend::is_device_suitable(VkPhysicalDevice device, VkPhysicalDeviceType t
 
         if (details.format.size() > 0 && details.present_modes.size() > 0 && extensions_supported)
         {
-            DW_LOG_INFO("(Vulkan) Vendor : " + std::string(get_vendor_name(m_device_properties.vendorID)));
-            DW_LOG_INFO("(Vulkan) Name   : " + std::string(m_device_properties.deviceName));
-            DW_LOG_INFO("(Vulkan) Type   : " + std::string(kDeviceTypes[m_device_properties.deviceType]));
-            DW_LOG_INFO("(Vulkan) Driver : " + std::to_string(m_device_properties.driverVersion));
-
             if (require_ray_tracing)
             {
+                // Get acceleration structure properties
+                DW_ZERO_MEMORY(m_acceleration_structure_properties);
+                m_acceleration_structure_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
+
                 // Get ray tracing pipeline properties
                 DW_ZERO_MEMORY(m_ray_tracing_pipeline_properties);
                 m_ray_tracing_pipeline_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;
+                m_ray_tracing_pipeline_properties.pNext = &m_acceleration_structure_properties;
 
                 VkPhysicalDeviceProperties2 device_properties2 {};
                 device_properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
                 device_properties2.pNext = &m_ray_tracing_pipeline_properties;
                 vkGetPhysicalDeviceProperties2(device, &device_properties2);
-
-                // Get acceleration structure properties
-                DW_ZERO_MEMORY(m_acceleration_structure_properties);
-                m_acceleration_structure_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
-
-                VkPhysicalDeviceFeatures2 device_features2 {};
-                device_features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-                device_features2.pNext = &m_acceleration_structure_properties;
-                vkGetPhysicalDeviceFeatures2(device, &device_features2);
             }
 
             return find_queues(device, infos);
@@ -4340,21 +4388,12 @@ bool Backend::find_queues(VkPhysicalDevice device, QueueInfos& infos)
     uint32_t family_count = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(device, &family_count, nullptr);
 
-    DW_LOG_INFO("(Vulkan) Number of Queue families: " + std::to_string(family_count));
-
     VkQueueFamilyProperties families[32];
     vkGetPhysicalDeviceQueueFamilyProperties(device, &family_count, &families[0]);
 
     for (uint32_t i = 0; i < family_count; i++)
     {
         VkQueueFlags bits = families[i].queueFlags;
-
-        DW_LOG_INFO("(Vulkan) Family " + std::to_string(i));
-        DW_LOG_INFO("(Vulkan) Supported Bits: ");
-        DW_LOG_INFO("(Vulkan) VK_QUEUE_GRAPHICS_BIT: " + std::to_string((families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) > 0));
-        DW_LOG_INFO("(Vulkan) VK_QUEUE_COMPUTE_BIT: " + std::to_string((families[i].queueFlags & VK_QUEUE_COMPUTE_BIT) > 0));
-        DW_LOG_INFO("(Vulkan) VK_QUEUE_TRANSFER_BIT: " + std::to_string((families[i].queueFlags & VK_QUEUE_TRANSFER_BIT) > 0));
-        DW_LOG_INFO("(Vulkan) Number of Queues: " + std::to_string(families[i].queueCount));
 
         VkBool32 present_support = false;
         vkGetPhysicalDeviceSurfaceSupportKHR(device, i, m_vk_surface, &present_support);
@@ -4536,13 +4575,13 @@ bool Backend::is_queue_compatible(VkQueueFlags current_queue_flags, int32_t grap
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
-bool Backend::create_logical_device(std::vector<const char*> extensions, bool require_ray_tracing)
+bool Backend::create_logical_device(std::vector<const char*> extensions, bool require_ray_tracing, bool _use_nsight_aftermath)
 {
+    // Ray Query Features
     VkPhysicalDeviceRayQueryFeaturesKHR device_ray_query_features;
     DW_ZERO_MEMORY(device_ray_query_features);
 
     device_ray_query_features.sType    = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
-    device_ray_query_features.pNext    = nullptr;
     device_ray_query_features.rayQuery = VK_TRUE;
 
     // Acceleration Structure Features
@@ -4561,27 +4600,60 @@ bool Backend::create_logical_device(std::vector<const char*> extensions, bool re
     device_ray_tracing_pipeline_features.pNext              = &device_acceleration_structure_features;
     device_ray_tracing_pipeline_features.rayTracingPipeline = VK_TRUE;
 
-    // Vulkan 1.1/1.2 Features
-    VkPhysicalDeviceVulkan11Features features11;
-    VkPhysicalDeviceVulkan12Features features12;
+    // Vulkan 1.3 Features
+    VkPhysicalDeviceVulkan13Features features13;
+    DW_ZERO_MEMORY(features13);
 
-    DW_ZERO_MEMORY(features11);
+    features13.sType                          = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    features13.pNext                          = require_ray_tracing ? &device_ray_tracing_pipeline_features : nullptr;
+    features13.shaderDemoteToHelperInvocation = VK_TRUE;
+    features13.dynamicRendering               = VK_TRUE;
+    features13.synchronization2               = VK_TRUE;
+
+    // Vulkan 1.2 Features
+    VkPhysicalDeviceVulkan12Features features12;
     DW_ZERO_MEMORY(features12);
+
+    features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    features12.pNext = &features13;
+
+    // Vulkan 1.1 Features
+    VkPhysicalDeviceVulkan11Features features11;
+    DW_ZERO_MEMORY(features11);
 
     features11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
     features11.pNext = &features12;
-
-    features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-
-    if (require_ray_tracing)
-        features12.pNext = &device_ray_tracing_pipeline_features;
-
+    
     // Physical Device Features 2
     VkPhysicalDeviceFeatures2 physical_device_features_2;
     DW_ZERO_MEMORY(physical_device_features_2);
 
     physical_device_features_2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     physical_device_features_2.pNext = &features11;
+
+    if (_use_nsight_aftermath && m_device_properties.vendorID == VENDOR_ID_NVIDIA)
+    {
+        VkDeviceDiagnosticsConfigCreateInfoNV device_diagnostics_config_create_info_nv;
+        DW_ZERO_MEMORY(device_diagnostics_config_create_info_nv);
+
+        device_diagnostics_config_create_info_nv.sType = VK_STRUCTURE_TYPE_DEVICE_DIAGNOSTICS_CONFIG_CREATE_INFO_NV;
+        device_diagnostics_config_create_info_nv.flags = VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_RESOURCE_TRACKING_BIT_NV | VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_AUTOMATIC_CHECKPOINTS_BIT_NV | VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_SHADER_DEBUG_INFO_BIT_NV | VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_SHADER_ERROR_REPORTING_BIT_NV;
+
+        if (GFSDK_Aftermath_EnableGpuCrashDumps(GFSDK_Aftermath_Version_API,
+                                                GFSDK_Aftermath_GpuCrashDumpWatchedApiFlags_Vulkan,
+                                                GFSDK_Aftermath_GpuCrashDumpFeatureFlags_DeferDebugInfoCallbacks,
+                                                aftermath::gpu_crash_dump_callback,
+                                                aftermath::shader_debug_info_callback,
+                                                nullptr,
+                                                nullptr,
+                                                nullptr)
+            != GFSDK_Aftermath_Result_Success)
+            DW_LOG_FATAL("Failed to enable Nsight Aftermath GPU crash dumps!");
+
+        device_diagnostics_config_create_info_nv.pNext = features13.pNext;
+
+        features13.pNext = &device_diagnostics_config_create_info_nv;
+    }
 
     vkGetPhysicalDeviceFeatures2(m_vk_physical_device, &physical_device_features_2);
 
@@ -4650,7 +4722,7 @@ bool Backend::create_swapchain()
 {
     m_current_frame                   = 0;
     VkSurfaceFormatKHR surface_format = choose_swap_surface_format(m_swapchain_details.format);
-    VkPresentModeKHR   present_mode   = m_vsync ? VK_PRESENT_MODE_FIFO_KHR : choose_swap_present_mode(m_swapchain_details.present_modes);
+    VkPresentModeKHR   present_mode   = choose_swap_present_mode(m_swapchain_details.present_modes);
     VkExtent2D         extent         = choose_swap_extent(m_swapchain_details.capabilities);
 
     uint32_t image_count = m_swapchain_details.capabilities.minImageCount + 1;
@@ -4701,7 +4773,6 @@ bool Backend::create_swapchain()
     vkGetSwapchainImagesKHR(m_vk_device, m_vk_swap_chain, &swap_image_count, nullptr);
     m_swap_chain_images.resize(swap_image_count);
     m_swap_chain_image_views.resize(swap_image_count);
-    m_swap_chain_framebuffers.resize(swap_image_count);
 
     VkImage images[32];
 
@@ -4722,28 +4793,22 @@ bool Backend::create_swapchain()
                                        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
                                        VK_SAMPLE_COUNT_1_BIT);
 
+    m_swap_chain_depth->set_name("Swap Chain Depth Image");
+
     m_swap_chain_depth_view = ImageView::create(shared_from_this(), m_swap_chain_depth, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_DEPTH_BIT);
 
-    create_render_pass();
-
-    std::vector<ImageView::Ptr> views(2);
-
-    views[1] = m_swap_chain_depth_view;
+    m_swap_chain_depth_view->set_name("Swap Chain Depth Image View");
 
     for (int i = 0; i < swap_image_count; i++)
     {
-        m_swap_chain_images[i]      = Image::create_from_swapchain(shared_from_this(), images[i], VK_IMAGE_TYPE_2D, m_swap_chain_extent.width, m_swap_chain_extent.height, 1, 1, 1, m_swap_chain_image_format, VMA_MEMORY_USAGE_UNKNOWN, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_SAMPLE_COUNT_1_BIT);
+        m_swap_chain_images[i] = Image::create_from_swapchain(shared_from_this(), images[i], VK_IMAGE_TYPE_2D, m_swap_chain_extent.width, m_swap_chain_extent.height, 1, 1, 1, m_swap_chain_image_format, VMA_MEMORY_USAGE_UNKNOWN, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_SAMPLE_COUNT_1_BIT);
+
+        m_swap_chain_images[i]->set_name("Swap Chain Image " + std::to_string(i));
+
         m_swap_chain_image_views[i] = ImageView::create(shared_from_this(), m_swap_chain_images[i], VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT);
 
-        views[0] = m_swap_chain_image_views[i];
-
-        m_swap_chain_framebuffers[i] = Framebuffer::create(shared_from_this(), m_swap_chain_render_pass, views, m_swap_chain_extent.width, m_swap_chain_extent.height, 1);
+        m_swap_chain_image_views[i]->set_name("Swap Chain Image View " + std::to_string(i));
     }
-
-    m_in_flight_fences.resize(kMaxFramesInFlight);
-
-    for (size_t i = 0; i < kMaxFramesInFlight; i++)
-        m_in_flight_fences[i] = Fence::create(shared_from_this());
 
     return true;
 }
@@ -4760,7 +4825,6 @@ void Backend::recreate_swapchain(bool vsync)
     for (int i = 0; i < m_swap_chain_images.size(); i++)
     {
         m_swap_chain_images[i].reset();
-        m_swap_chain_framebuffers[i].reset();
         m_swap_chain_image_views[i].reset();
     }
 
@@ -4771,74 +4835,6 @@ void Backend::recreate_swapchain(bool vsync)
         DW_LOG_FATAL("(Vulkan) Failed to create swap chain!");
         throw std::runtime_error("(Vulkan) Failed to create swap chain!");
     }
-}
-
-// -----------------------------------------------------------------------------------------------------------------------------------
-
-void Backend::create_render_pass()
-{
-    std::vector<VkAttachmentDescription> attachments(2);
-
-    // Color attachment
-    attachments[0].format         = m_swap_chain_image_format;
-    attachments[0].samples        = VK_SAMPLE_COUNT_1_BIT;
-    attachments[0].loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    attachments[0].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
-    attachments[0].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    attachments[0].initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
-    attachments[0].finalLayout    = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-
-    // Depth attachment
-    attachments[1].format         = m_swap_chain_depth_format;
-    attachments[1].samples        = VK_SAMPLE_COUNT_1_BIT;
-    attachments[1].loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    attachments[1].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
-    attachments[1].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    attachments[1].initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
-    attachments[1].finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-    VkAttachmentReference color_reference;
-    color_reference.attachment = 0;
-    color_reference.layout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-    VkAttachmentReference depth_reference;
-    depth_reference.attachment = 1;
-    depth_reference.layout     = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-    std::vector<VkSubpassDescription> subpass_description(1);
-
-    subpass_description[0].pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass_description[0].colorAttachmentCount    = 1;
-    subpass_description[0].pColorAttachments       = &color_reference;
-    subpass_description[0].pDepthStencilAttachment = &depth_reference;
-    subpass_description[0].inputAttachmentCount    = 0;
-    subpass_description[0].pInputAttachments       = nullptr;
-    subpass_description[0].preserveAttachmentCount = 0;
-    subpass_description[0].pPreserveAttachments    = nullptr;
-    subpass_description[0].pResolveAttachments     = nullptr;
-
-    // Subpass dependencies for layout transitions
-    std::vector<VkSubpassDependency> dependencies(2);
-
-    dependencies[0].srcSubpass      = VK_SUBPASS_EXTERNAL;
-    dependencies[0].dstSubpass      = 0;
-    dependencies[0].srcStageMask    = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
-    dependencies[0].dstStageMask    = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependencies[0].srcAccessMask   = VK_ACCESS_MEMORY_READ_BIT;
-    dependencies[0].dstAccessMask   = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    dependencies[0].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
-
-    dependencies[1].srcSubpass      = 0;
-    dependencies[1].dstSubpass      = VK_SUBPASS_EXTERNAL;
-    dependencies[1].srcStageMask    = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependencies[1].dstStageMask    = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
-    dependencies[1].srcAccessMask   = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    dependencies[1].dstAccessMask   = VK_ACCESS_MEMORY_READ_BIT;
-    dependencies[1].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
-
-    m_swap_chain_render_pass = RenderPass::create(shared_from_this(), attachments, subpass_description, dependencies);
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------
@@ -4869,17 +4865,22 @@ VkSurfaceFormatKHR Backend::choose_swap_surface_format(const std::vector<VkSurfa
 
 VkPresentModeKHR Backend::choose_swap_present_mode(const std::vector<VkPresentModeKHR>& available_modes)
 {
-    VkPresentModeKHR best_mode = VK_PRESENT_MODE_FIFO_KHR;
-
-    for (const auto& available_mode : available_modes)
+    if (!m_vsync)
     {
-        if (available_mode == VK_PRESENT_MODE_MAILBOX_KHR)
-            best_mode = available_mode;
-        else if (available_mode == VK_PRESENT_MODE_IMMEDIATE_KHR)
-            best_mode = available_mode;
+        for (const auto& available_mode : available_modes)
+        {
+            if (available_mode == VK_PRESENT_MODE_MAILBOX_KHR)
+                return VK_PRESENT_MODE_MAILBOX_KHR;
+        }
+
+        for (const auto& available_mode : available_modes)
+        {
+            if (available_mode == VK_PRESENT_MODE_IMMEDIATE_KHR)
+                return VK_PRESENT_MODE_IMMEDIATE_KHR;
+        }
     }
 
-    return best_mode;
+    return VK_PRESENT_MODE_FIFO_KHR;
 }
 
 // -----------------------------------------------------------------------------------------------------------------------------------
@@ -4906,143 +4907,16 @@ VkExtent2D Backend::choose_swap_extent(const VkSurfaceCapabilitiesKHR& capabilit
 
 namespace utilities
 {
-void set_image_layout(VkCommandBuffer         cmdbuffer,
-                      VkImage                 image,
-                      VkImageLayout           oldImageLayout,
-                      VkImageLayout           newImageLayout,
-                      VkImageSubresourceRange subresourceRange,
-                      VkPipelineStageFlags    srcStageMask,
-                      VkPipelineStageFlags    dstStageMask)
-{
-    // Create an image barrier object
-    VkImageMemoryBarrier image_memory_barrier;
-    DW_ZERO_MEMORY(image_memory_barrier);
-
-    image_memory_barrier.sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    image_memory_barrier.oldLayout        = oldImageLayout;
-    image_memory_barrier.newLayout        = newImageLayout;
-    image_memory_barrier.image            = image;
-    image_memory_barrier.subresourceRange = subresourceRange;
-
-    // Source layouts (old)
-    // Source access mask controls actions that have to be finished on the old layout
-    // before it will be transitioned to the new layout
-    switch (oldImageLayout)
-    {
-        case VK_IMAGE_LAYOUT_UNDEFINED:
-            // Image layout is undefined (or does not matter)
-            // Only valid as initial layout
-            // No flags required, listed only for completeness
-            image_memory_barrier.srcAccessMask = 0;
-            break;
-
-        case VK_IMAGE_LAYOUT_PREINITIALIZED:
-            // Image is preinitialized
-            // Only valid as initial layout for linear images, preserves memory contents
-            // Make sure host writes have been finished
-            image_memory_barrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
-            break;
-
-        case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
-            // Image is a color attachment
-            // Make sure any writes to the color buffer have been finished
-            image_memory_barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-            break;
-
-        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
-            // Image is a depth/stencil attachment
-            // Make sure any writes to the depth/stencil buffer have been finished
-            image_memory_barrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-            break;
-
-        case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
-            // Image is a transfer source
-            // Make sure any reads from the image have been finished
-            image_memory_barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-            break;
-
-        case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
-            // Image is a transfer destination
-            // Make sure any writes to the image have been finished
-            image_memory_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            break;
-
-        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
-            // Image is read by a shader
-            // Make sure any shader reads from the image have been finished
-            image_memory_barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-            break;
-        default:
-            // Other source layouts aren't handled (yet)
-            break;
-    }
-
-    // Target layouts (new)
-    // Destination access mask controls the dependency for the new image layout
-    switch (newImageLayout)
-    {
-        case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
-            // Image will be used as a transfer destination
-            // Make sure any writes to the image have been finished
-            image_memory_barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            break;
-
-        case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
-            // Image will be used as a transfer source
-            // Make sure any reads from the image have been finished
-            image_memory_barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-            break;
-
-        case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
-            // Image will be used as a color attachment
-            // Make sure any writes to the color buffer have been finished
-            image_memory_barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-            break;
-
-        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
-            // Image layout will be used as a depth/stencil attachment
-            // Make sure any writes to depth/stencil buffer have been finished
-            image_memory_barrier.dstAccessMask = image_memory_barrier.dstAccessMask | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-            break;
-
-        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
-            // Image will be read in a shader (sampler, input attachment)
-            // Make sure any writes to the image have been finished
-            if (image_memory_barrier.srcAccessMask == 0)
-            {
-                image_memory_barrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-            }
-            image_memory_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-            break;
-        default:
-            // Other source layouts aren't handled (yet)
-            break;
-    }
-
-    // Put barrier inside setup command buffer
-    vkCmdPipelineBarrier(
-        cmdbuffer,
-        srcStageMask,
-        dstStageMask,
-        0,
-        0,
-        nullptr,
-        0,
-        nullptr,
-        1,
-        &image_memory_barrier);
-}
-
 void blitt_image(vk::CommandBuffer::Ptr cmd_buf,
                  vk::Image::Ptr         src,
                  vk::Image::Ptr         dst,
-                 VkImageLayout          src_img_src_layout,
                  VkImageLayout          src_img_dst_layout,
-                 VkImageLayout          dst_img_src_layout,
                  VkImageLayout          dst_img_dst_layout,
                  VkImageAspectFlags     aspect_flags,
                  VkFilter               filter)
 {
+    auto backend = cmd_buf->backend().lock();
+
     VkImageSubresourceRange initial_subresource_range;
     DW_ZERO_MEMORY(initial_subresource_range);
 
@@ -5052,20 +4926,10 @@ void blitt_image(vk::CommandBuffer::Ptr cmd_buf,
     initial_subresource_range.baseArrayLayer = 0;
     initial_subresource_range.baseMipLevel   = 0;
 
-    if (src_img_src_layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
-    {
-        vk::utilities::set_image_layout(cmd_buf->handle(),
-                                        src->handle(),
-                                        src_img_src_layout,
-                                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                        initial_subresource_range);
-    }
+    backend->use_resource(VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR, VK_ACCESS_2_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, src, initial_subresource_range);
+    backend->use_resource(VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, dst, initial_subresource_range);
 
-    vk::utilities::set_image_layout(cmd_buf->handle(),
-                                    dst->handle(),
-                                    dst_img_src_layout,
-                                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                    initial_subresource_range);
+    backend->flush_barriers(cmd_buf);
 
     VkImageBlit blit                   = {};
     blit.srcOffsets[0]                 = { 0, 0, 0 };
@@ -5090,17 +4954,10 @@ void blitt_image(vk::CommandBuffer::Ptr cmd_buf,
                    &blit,
                    filter);
 
-    vk::utilities::set_image_layout(cmd_buf->handle(),
-                                    src->handle(),
-                                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                    src_img_dst_layout,
-                                    initial_subresource_range);
+    backend->use_resource(VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_SHADER_READ_BIT, src_img_dst_layout, src, initial_subresource_range);
+    backend->use_resource(VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_SHADER_READ_BIT, dst_img_dst_layout, dst, initial_subresource_range);
 
-    vk::utilities::set_image_layout(cmd_buf->handle(),
-                                    dst->handle(),
-                                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                    dst_img_dst_layout,
-                                    initial_subresource_range);
+    backend->flush_barriers(cmd_buf);
 }
 
 uint32_t get_memory_type(VkPhysicalDevice device, uint32_t typeBits, VkMemoryPropertyFlags properties, VkBool32* memTypeFound)
