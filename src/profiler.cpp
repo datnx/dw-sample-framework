@@ -22,15 +22,11 @@ struct Profiler
     struct Sample
     {
         std::string name;
-        SampleType  type;
 #if defined(DWSF_VULKAN)
         uint32_t query_index;
 #else
+        SampleType  type;
         std::unique_ptr<gl::Query> query;
-#endif
-        bool    start = true;
-        double  cpu_time;
-        Sample* end_sample;
         Sample(SampleType T) : type(T)
         {
             if (T == CPU)
@@ -38,6 +34,10 @@ struct Profiler
             else
                 query = std::make_unique<gl::Query>();
         }
+#endif
+        bool    start = true;
+        double  cpu_time;
+        Sample* end_sample;
     };
 
     struct Buffer
@@ -88,22 +88,91 @@ struct Profiler
 
     // -----------------------------------------------------------------------------------------------------------------------------------
 
-    void begin_sample(std::string name, SampleType type
-#if defined(DWSF_VULKAN)
-                      ,
-                      vk::CommandBuffer::Ptr cmd_buf
-#endif
-    )
+    double get_current_cpu_time()
     {
+#ifdef WIN32
+        LARGE_INTEGER cpu_time;
+        QueryPerformanceCounter(&cpu_time);
+        return cpu_time.QuadPart * (1000000.0 / m_frequency.QuadPart);
+#else
+        timeval cpu_time;
+        gettimeofday(&cpu_time, nullptr);
+        return (cpu_time.tv_sec * 1000000.0) + cpu_time.tv_usec;
+#endif
+    }
+
+    // -----------------------------------------------------------------------------------------------------------------------------------
+
 #if defined(DWSF_VULKAN)
+    void begin_sample(std::string name, vk::CommandBuffer::Ptr cmd_buf)
+    {
         if (m_should_reset)
         {
             m_sample_buffers[m_write_buffer_idx].query_index = 0;
             vkCmdResetQueryPool(cmd_buf->handle(), m_sample_buffers[m_write_buffer_idx].query_pool->handle(), 0, MAX_SAMPLES);
             m_should_reset = false;
         }
-#endif
 
+        int32_t idx = m_sample_buffers[m_write_buffer_idx].index++;
+
+        if (!m_sample_buffers[m_write_buffer_idx].samples[idx])
+            m_sample_buffers[m_write_buffer_idx].samples[idx] = std::make_unique<Sample>();
+
+        auto& sample = m_sample_buffers[m_write_buffer_idx].samples[idx];
+
+        sample->name = name;
+
+        sample->query_index = m_sample_buffers[m_write_buffer_idx].query_index++;
+        vkCmdWriteTimestamp(cmd_buf->handle(), VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_sample_buffers[m_write_buffer_idx].query_pool->handle(), sample->query_index);
+
+        VkDebugUtilsLabelEXT debug_label;
+
+        debug_label.sType      = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
+        debug_label.pNext      = nullptr;
+        debug_label.pLabelName = name.c_str();
+        debug_label.color[0]   = 0.0f;
+        debug_label.color[1]   = 1.0f;
+        debug_label.color[2]   = 0.0f;
+        debug_label.color[3]   = 1.0f;
+
+        vkCmdBeginDebugUtilsLabelEXT(cmd_buf->handle(), &debug_label);
+
+        sample->end_sample = nullptr;
+        sample->start      = true;
+        sample->cpu_time = get_current_cpu_time();
+
+        m_sample_stack.push(sample.get());
+    }
+
+    void end_sample(std::string name, vk::CommandBuffer::Ptr cmd_buf)
+    {
+        int32_t idx = m_sample_buffers[m_write_buffer_idx].index++;
+
+        if (!m_sample_buffers[m_write_buffer_idx].samples[idx])
+            m_sample_buffers[m_write_buffer_idx].samples[idx] = std::make_unique<Sample>();
+
+        auto& sample = m_sample_buffers[m_write_buffer_idx].samples[idx];
+
+        sample->name  = name;
+        sample->start = false;
+
+        sample->query_index = m_sample_buffers[m_write_buffer_idx].query_index++;
+        vkCmdWriteTimestamp(cmd_buf->handle(), VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_sample_buffers[m_write_buffer_idx].query_pool->handle(), sample->query_index);
+
+        vkCmdEndDebugUtilsLabelEXT(cmd_buf->handle());
+
+        sample->end_sample = nullptr;
+        sample->cpu_time = get_current_cpu_time();
+
+        Sample* start = m_sample_stack.top();
+
+        start->end_sample = sample.get();
+
+        m_sample_stack.pop();
+    }
+#else
+    void begin_sample(std::string name, SampleType type)
+    {
         int32_t idx = m_sample_buffers[m_write_buffer_idx].index++;
 
         if (!m_sample_buffers[m_write_buffer_idx].samples[idx])
@@ -114,56 +183,16 @@ struct Profiler
         sample->name = name;
         sample->type = type;
 
-        if (type != CPU)
-        {
-#if defined(DWSF_VULKAN)
-            sample->query_index = m_sample_buffers[m_write_buffer_idx].query_index++;
-            vkCmdWriteTimestamp(cmd_buf->handle(), VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_sample_buffers[m_write_buffer_idx].query_pool->handle(), sample->query_index);
-
-            VkDebugUtilsLabelEXT debug_label;
-
-            debug_label.sType      = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
-            debug_label.pNext      = nullptr;
-            debug_label.pLabelName = name.c_str();
-            debug_label.color[0]   = 0.0f;
-            debug_label.color[1]   = 1.0f;
-            debug_label.color[2]   = 0.0f;
-            debug_label.color[3]   = 1.0f;
-
-            vkCmdBeginDebugUtilsLabelEXT(cmd_buf->handle(), &debug_label);
-#else
-            sample->query->query_counter(GL_TIMESTAMP);
-#endif
-        }
+        if (type != CPU) sample->query->query_counter(GL_TIMESTAMP);
 
         sample->end_sample = nullptr;
         sample->start      = true;
-
-        if (type != GPU)
-        {
-#ifdef WIN32
-
-            LARGE_INTEGER cpu_time;
-            QueryPerformanceCounter(&cpu_time);
-            sample->cpu_time = cpu_time.QuadPart * (1000000.0 / m_frequency.QuadPart);
-#else
-            timeval cpu_time;
-            gettimeofday(&cpu_time, nullptr);
-            sample->cpu_time = (cpu_time.tv_sec * 1000000.0) + cpu_time.tv_usec;
-#endif
-        }
+        if (type != GPU) sample->cpu_time = get_current_cpu_time();
 
         m_sample_stack.push(sample.get());
     }
 
-    // -----------------------------------------------------------------------------------------------------------------------------------
-
-    void end_sample(std::string name, SampleType type
-#if defined(DWSF_VULKAN)
-                    ,
-                    vk::CommandBuffer::Ptr cmd_buf
-#endif
-    )
+    void end_sample(std::string name, SampleType type)
     {
         int32_t idx = m_sample_buffers[m_write_buffer_idx].index++;
 
@@ -176,32 +205,10 @@ struct Profiler
         sample->type  = type;
         sample->start = false;
 
-        if (sample->type != CPU)
-        {
-#if defined(DWSF_VULKAN)
-            sample->query_index = m_sample_buffers[m_write_buffer_idx].query_index++;
-            vkCmdWriteTimestamp(cmd_buf->handle(), VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_sample_buffers[m_write_buffer_idx].query_pool->handle(), sample->query_index);
-
-            vkCmdEndDebugUtilsLabelEXT(cmd_buf->handle());
-#else
-            sample->query->query_counter(GL_TIMESTAMP);
-#endif
-        }
+        if (sample->type != CPU) sample->query->query_counter(GL_TIMESTAMP);
 
         sample->end_sample = nullptr;
-
-        if (sample->type != GPU)
-        {
-#ifdef WIN32
-            LARGE_INTEGER cpu_time;
-            QueryPerformanceCounter(&cpu_time);
-            sample->cpu_time = cpu_time.QuadPart * (1000000.0 / m_frequency.QuadPart);
-#else
-            timeval cpu_time;
-            gettimeofday(&cpu_time, nullptr);
-            sample->cpu_time = (cpu_time.tv_sec * 1000000.0) + cpu_time.tv_usec;
-#endif
-        }
+        if (sample->type != GPU) sample->cpu_time = get_current_cpu_time();
 
         Sample* start = m_sample_stack.top();
 
@@ -209,7 +216,7 @@ struct Profiler
 
         m_sample_stack.pop();
     }
-
+#endif
     // -----------------------------------------------------------------------------------------------------------------------------------
 
     void begin_frame()
@@ -263,6 +270,25 @@ struct Profiler
 
                     float gpu_time, cpu_time;
 
+#if defined(DWSF_VULKAN)
+                    cpu_time = (sample->end_sample->cpu_time - sample->cpu_time) * 0.001f;
+                    m_current_frame_time.emplace_back(cpu_time);
+
+                    uint64_t start_time = 0;
+                    uint64_t end_time   = 0;
+                    
+                    m_sample_buffers[m_read_buffer_idx].query_pool->results(sample->query_index, 1, sizeof(uint64_t), &start_time, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+                    m_sample_buffers[m_read_buffer_idx].query_pool->results(sample->end_sample->query_index, 1, sizeof(uint64_t), &end_time, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+
+                    uint64_t gpu_time_diff = end_time - start_time;
+                             gpu_time      = float(gpu_time_diff / 1000000.0);
+                    m_current_frame_time.emplace_back(gpu_time);
+
+                    if (ImGui::TreeNode(id.c_str(), "%s | %f ms (CPU) | %f ms (GPU)", sample->name.c_str(), cpu_time, gpu_time))
+                        m_should_pop_stack.push(true);
+                    else
+                        m_should_pop_stack.push(false);
+#else
                     if (sample->type != GPU)
                     {
                         cpu_time = (sample->end_sample->cpu_time - sample->cpu_time) * 0.001f;
@@ -274,42 +300,26 @@ struct Profiler
                         uint64_t start_time = 0;
                         uint64_t end_time   = 0;
 
-#    if defined(DWSF_VULKAN)
-                        m_sample_buffers[m_read_buffer_idx].query_pool->results(sample->query_index, 1, sizeof(uint64_t), &start_time, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
-                        m_sample_buffers[m_read_buffer_idx].query_pool->results(sample->end_sample->query_index, 1, sizeof(uint64_t), &end_time, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
-#    else
                         if (!sample->query->result_available()) DW_LOG_WARNING("stall");
                         sample->query->result_64(&start_time);
                         if (!sample->end_sample->query->result_available()) DW_LOG_WARNING("stall");
                         sample->end_sample->query->result_64(&end_time);
-#    endif
 
                         uint64_t gpu_time_diff = end_time - start_time;
                                  gpu_time      = float(gpu_time_diff / 1000000.0);
                         m_current_frame_time.emplace_back(gpu_time);
                     }
 
+                    bool time_display;
                     if (sample->type == CPU_GPU)
-                    {
-                        if (ImGui::TreeNode(id.c_str(), "%s | %f ms (CPU) | %f ms (GPU)", sample->name.c_str(), cpu_time, gpu_time))
-                            m_should_pop_stack.push(true);
-                        else
-                            m_should_pop_stack.push(false);
-                    }
+                        time_display = ImGui::TreeNode(id.c_str(), "%s | %f ms (CPU) | %f ms (GPU)", sample->name.c_str(), cpu_time, gpu_time);
                     else if (sample->type == CPU)
-                    {
-                        if (ImGui::TreeNode(id.c_str(), "%s | %f ms (CPU)", sample->name.c_str(), cpu_time))
-                            m_should_pop_stack.push(true);
-                        else
-                            m_should_pop_stack.push(false);
-                    }
+                        time_display = ImGui::TreeNode(id.c_str(), "%s | %f ms (CPU)", sample->name.c_str(), cpu_time);
                     else if (sample->type == GPU)
-                    {
-                        if (ImGui::TreeNode(id.c_str(), "%s | %f ms (GPU)", sample->name.c_str(), gpu_time))
-                            m_should_pop_stack.push(true);
-                        else
-                            m_should_pop_stack.push(false);
-                    }
+                        time_display = ImGui::TreeNode(id.c_str(), "%s | %f ms (GPU)", sample->name.c_str(), gpu_time);
+                    if (time_display) m_should_pop_stack.push(true);
+                    else m_should_pop_stack.push(false);
+#endif
                 }
                 else
                 {
@@ -340,16 +350,17 @@ struct Profiler
                 auto& sample = m_sample_buffers[m_read_buffer_idx].samples[i];
                 if (sample->start)
                 {
+#if defined(DWSF_VULKAN)
+                    names.push_back(sample->name);
+#else
                     std::string name = sample->name;
                     if (sample->type == SampleType::CPU_GPU)
                     {
                         names.push_back(name + "_cpu");
                         names.push_back(name + "_gpu");
                     }
-                    else
-                    {
-                        names.push_back(name);
-                    }
+                    else names.push_back(name);
+#endif
                 }
             }
         }
@@ -379,90 +390,62 @@ Profiler* g_profiler = nullptr;
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
-ScopedProfile::ScopedProfile(std::string name, SampleType type
 #if defined(DWSF_VULKAN)
-                             ,
-                             vk::CommandBuffer::Ptr cmd_buf
-#endif
-                             ) :
-    m_name(name)
+ScopedProfile::ScopedProfile(std::string name, vk::CommandBuffer::Ptr cmd_buf) : m_name(name)
 {
-    begin_sample(m_name, type
-#if defined(DWSF_VULKAN)
-                 ,
-                 cmd_buf
-#endif
-    );
-
-#if defined(DWSF_VULKAN)
+    begin_sample(m_name, cmd_buf);
     m_cmd_buf = cmd_buf;
-#endif
 }
-
-// -----------------------------------------------------------------------------------------------------------------------------------
 
 ScopedProfile::~ScopedProfile()
 {
-    end_sample(m_name, m_type
-#if defined(DWSF_VULKAN)
-               ,
-               m_cmd_buf
-#endif
-    );
+    end_sample(m_name, m_cmd_buf);
 }
 
-// -----------------------------------------------------------------------------------------------------------------------------------
-
-void initialize(
-#if defined(DWSF_VULKAN)
-    vk::Backend::Ptr backend
-#endif
-)
+void initialize(vk::Backend::Ptr backend)
 {
-    g_profiler = new Profiler(
-#if defined(DWSF_VULKAN)
-        backend
-#endif
-    );
+    g_profiler = new Profiler(backend);
 }
+
+void begin_sample(std::string name, vk::CommandBuffer::Ptr cmd_buf)
+{
+    g_profiler->begin_sample(name, cmd_buf);
+}
+
+void end_sample(std::string name, vk::CommandBuffer::Ptr cmd_buf)
+{
+    g_profiler->end_sample(name, cmd_buf);
+}
+#else
+ScopedProfile::ScopedProfile(std::string name, SampleType type) : m_name(name)
+{
+    begin_sample(m_name, type);
+}
+
+ScopedProfile::~ScopedProfile()
+{
+    end_sample(m_name, m_type);
+}
+
+void initialize()
+{
+    g_profiler = new Profiler();
+}
+
+void begin_sample(std::string name, SampleType type)
+{
+    g_profiler->begin_sample(name, type);
+}
+
+void end_sample(std::string name, SampleType type)
+{
+    g_profiler->end_sample(name, type);
+}
+#endif
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 
 void shutdown() { DW_SAFE_DELETE(g_profiler); }
-
-// -----------------------------------------------------------------------------------------------------------------------------------
-
-void begin_sample(std::string name, SampleType type
-#if defined(DWSF_VULKAN)
-                  ,
-                  vk::CommandBuffer::Ptr cmd_buf
-#endif
-)
-{
-    g_profiler->begin_sample(name, type
-#if defined(DWSF_VULKAN)
-                             ,
-                             cmd_buf
-#endif
-    );
-}
-
-// -----------------------------------------------------------------------------------------------------------------------------------
-
-void end_sample(std::string name, SampleType type
-#if defined(DWSF_VULKAN)
-                ,
-                vk::CommandBuffer::Ptr cmd_buf
-#endif
-)
-{
-    g_profiler->end_sample(name, type
-#if defined(DWSF_VULKAN)
-                           ,
-                           cmd_buf
-#endif
-    );
-}
 
 // -----------------------------------------------------------------------------------------------------------------------------------
 

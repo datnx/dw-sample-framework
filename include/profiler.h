@@ -8,11 +8,7 @@
 #    include "vk.h"
 #endif
 
-#if defined(DWSF_VULKAN)
-#    define DW_SCOPED_SAMPLE(name, type, cmd_buf) dw::profiler::ScopedProfile __FILE__##__LINE__(name, type, cmd_buf)
-#else
-#    define DW_SCOPED_SAMPLE(name, ...) dw::profiler::ScopedProfile __FILE__##__LINE__(name, ##__VA_ARGS__)
-#endif
+#define DW_SCOPED_SAMPLE(name, ...) dw::profiler::ScopedProfile __FILE__##__LINE__(name, ##__VA_ARGS__)
 
 namespace dw
 {
@@ -20,6 +16,19 @@ namespace profiler
 {
 constexpr int BUFFER_COUNT = 4;
 
+#if defined(DWSF_VULKAN)
+struct ScopedProfile
+{
+    ScopedProfile(std::string name, vk::CommandBuffer::Ptr cmd_buf);
+    ~ScopedProfile();
+    vk::CommandBuffer::Ptr m_cmd_buf;
+    std::string m_name;
+};
+
+extern void initialize(vk::Backend::Ptr backend);
+extern void begin_sample(std::string name, vk::CommandBuffer::Ptr cmd_buf);
+extern void end_sample(std::string name, vk::CommandBuffer::Ptr cmd_buf);
+#else
 enum SampleType
 {
     CPU,
@@ -29,39 +38,18 @@ enum SampleType
 
 struct ScopedProfile
 {
-    ScopedProfile(std::string name, SampleType type = CPU_GPU
-#if defined(DWSF_VULKAN)
-                  ,
-                  vk::CommandBuffer::Ptr cmd_buf
-#endif
-    );
+    ScopedProfile(std::string name, SampleType type = CPU_GPU);
     ~ScopedProfile();
-
-#if defined(DWSF_VULKAN)
-    vk::CommandBuffer::Ptr m_cmd_buf;
-#endif
-    std::string m_name;
     SampleType  m_type;
+    std::string m_name;
 };
 
-extern void initialize(
-#if defined(DWSF_VULKAN)
-    vk::Backend::Ptr backend
+extern void initialize();
+extern void begin_sample(std::string name, SampleType type);
+extern void end_sample(std::string name, SampleType type);
 #endif
-);
+
 extern void shutdown();
-extern void begin_sample(std::string name, SampleType type
-#if defined(DWSF_VULKAN)
-                         ,
-                         vk::CommandBuffer::Ptr cmd_buf
-#endif
-);
-extern void end_sample(std::string name, SampleType type
-#if defined(DWSF_VULKAN)
-                       ,
-                       vk::CommandBuffer::Ptr cmd_buf
-#endif
-);
 extern void begin_frame();
 extern void end_frame();
 
