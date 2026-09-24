@@ -150,6 +150,7 @@ public:
     inline VkExtent2D                                         swap_chain_extents() { return m_swap_chain_extent; }
     inline uint32_t                                           current_frame_idx() { return m_current_frame; }
     inline uint32_t                                           swapchain_size() { return m_swap_chain_images.size(); }
+    inline uint32_t                                           image_idx() { return m_image_index; }
     inline const QueueInfos&                                  queue_infos() { return m_selected_queues; }
     inline std::shared_ptr<Sampler>                           bilinear_sampler() { return m_bilinear_sampler; }
     inline std::shared_ptr<Sampler>                           trilinear_sampler() { return m_trilinear_sampler; }

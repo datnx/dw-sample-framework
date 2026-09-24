@@ -433,15 +433,16 @@ void Application::render_gui(vk::CommandBuffer::Ptr cmd_buf)
 
 void Application::submit_and_present(const std::vector<vk::CommandBuffer::Ptr>& cmd_bufs)
 {
-    const uint32_t semaphore_idx = m_frame_index % static_cast<uint32_t>(m_present_complete_semaphores.size());
-    const uint32_t fence_idx     = m_frame_index % static_cast<uint32_t>(m_render_complete_fences.size());
+    const uint32_t present_complete_semaphore_idx = m_frame_index % static_cast<uint32_t>(m_present_complete_semaphores.size());
+    const uint32_t render_complete_semaphore_idx  = m_vk_backend->image_idx();
+    const uint32_t fence_idx                      = m_frame_index % static_cast<uint32_t>(m_render_complete_fences.size());
 
     m_vk_backend->submit_graphics(cmd_bufs,
-                                  { m_present_complete_semaphores[semaphore_idx] },
-                                  { m_render_complete_semaphores[semaphore_idx] },
+                                  { m_present_complete_semaphores[present_complete_semaphore_idx] },
+                                  { m_render_complete_semaphores[render_complete_semaphore_idx] },
                                   m_render_complete_fences[fence_idx]);
 
-    m_vk_backend->present({ m_render_complete_semaphores[semaphore_idx] });
+    m_vk_backend->present({ m_render_complete_semaphores[render_complete_semaphore_idx] });
 }
 
 #endif
