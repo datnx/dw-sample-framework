@@ -100,6 +100,8 @@ protected:
         // Set custom settings here...
         dw::AppSettings settings;
 
+        settings.enable_validation = true;
+
         settings.width       = 1280;
         settings.height      = 720;
         settings.title       = "Hello dwSampleFramework (Vulkan)";
@@ -301,10 +303,15 @@ private:
             .add_dynamic_state(VK_DYNAMIC_STATE_SCISSOR);
 
         // ---------------------------------------------------------------------------
-        // Create pipeline
+        // Set attachment formats
         // ---------------------------------------------------------------------------
 
-        pso_desc.set_render_pass(m_vk_backend->swapchain_render_pass());
+        pso_desc.add_color_attachment_format(m_vk_backend->swap_chain_image_format())
+            .set_depth_attachment_format(m_vk_backend->swap_chain_depth_format());
+
+        // ---------------------------------------------------------------------------
+        // Create pipeline
+        // ---------------------------------------------------------------------------
 
         m_pso = dw::vk::GraphicsPipeline::create(m_vk_backend, pso_desc);
     }
@@ -313,7 +320,7 @@ private:
 
     bool load_mesh()
     {
-        m_mesh = dw::Mesh::load(m_vk_backend, "teapot.obj");
+        m_mesh = dw::Mesh::load(m_vk_backend, "../../3d_models/teapot/teapot.obj");
         return m_mesh != nullptr;
     }
 
@@ -331,28 +338,59 @@ private:
     {
         DW_SCOPED_SAMPLE("render", cmd_buf);
 
-        VkClearValue clear_values[2];
+        auto color_image = m_vk_backend->swapchain_image();
+        auto depth_image = m_vk_backend->swapchain_depth_image();
 
-        clear_values[0].color.float32[0] = 0.0f;
-        clear_values[0].color.float32[1] = 0.0f;
-        clear_values[0].color.float32[2] = 0.0f;
-        clear_values[0].color.float32[3] = 1.0f;
+        VkImageSubresourceRange color_range = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        VkImageSubresourceRange depth_range = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
 
-        clear_values[1].color.float32[0] = 1.0f;
-        clear_values[1].color.float32[1] = 1.0f;
-        clear_values[1].color.float32[2] = 1.0f;
-        clear_values[1].color.float32[3] = 1.0f;
+        m_vk_backend->use_resource(
+            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            color_image,
+            color_range
+        );
 
-        VkRenderPassBeginInfo info    = {};
-        info.sType                    = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        info.renderPass               = m_vk_backend->swapchain_render_pass()->handle();
-        info.framebuffer              = m_vk_backend->swapchain_framebuffer()->handle();
-        info.renderArea.extent.width  = m_width;
-        info.renderArea.extent.height = m_height;
-        info.clearValueCount          = 2;
-        info.pClearValues             = &clear_values[0];
+        m_vk_backend->use_resource(
+            VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            depth_image,
+            depth_range
+        );
 
-        vkCmdBeginRenderPass(cmd_buf->handle(), &info, VK_SUBPASS_CONTENTS_INLINE);
+        m_vk_backend->flush_barriers(cmd_buf);
+
+        VkRenderingAttachmentInfoKHR color_attachment = {};
+
+        color_attachment.sType            = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
+        color_attachment.imageView        = m_vk_backend->swapchain_image_view()->handle();
+        color_attachment.imageLayout      = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        color_attachment.loadOp           = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        color_attachment.storeOp          = VK_ATTACHMENT_STORE_OP_STORE;
+        color_attachment.clearValue.color = { 0.0f, 0.0f, 0.0f, 1.0f };
+
+        VkRenderingAttachmentInfoKHR depth_attachment = {};
+
+        depth_attachment.sType                   = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
+        depth_attachment.imageView               = m_vk_backend->swapchain_depth_image_view()->handle();
+        depth_attachment.imageLayout             = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        depth_attachment.loadOp                  = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depth_attachment.storeOp                 = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        depth_attachment.clearValue.depthStencil = { 1.0f, 0 };
+
+        VkRenderingInfoKHR rendering_info = {};
+
+        rendering_info.sType                = VK_STRUCTURE_TYPE_RENDERING_INFO_KHR;
+        rendering_info.renderArea           = { { 0, 0 }, { m_width, m_height } };
+        rendering_info.layerCount           = 1;
+        rendering_info.colorAttachmentCount = 1;
+        rendering_info.pColorAttachments    = &color_attachment;
+        rendering_info.pDepthAttachment     = &depth_attachment;
+        rendering_info.pStencilAttachment   = nullptr;
+
+        vkCmdBeginRenderingKHR(cmd_buf->handle(), &rendering_info);
 
         vkCmdBindPipeline(cmd_buf->handle(), VK_PIPELINE_BIND_POINT_GRAPHICS, m_pso->handle());
 
@@ -397,9 +435,51 @@ private:
             vkCmdDrawIndexed(cmd_buf->handle(), submesh.index_count, 1, submesh.base_index, submesh.base_vertex, 0);
         }
 
+        vkCmdEndRenderingKHR(cmd_buf->handle());
+
+        m_vk_backend->use_resource(
+            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            color_image,
+            color_range
+        );
+
+        m_vk_backend->flush_barriers(cmd_buf);
+
+        VkRenderingAttachmentInfoKHR ui_color_attachment = {};
+
+        ui_color_attachment.sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
+        ui_color_attachment.imageView   = m_vk_backend->swapchain_image_view()->handle();
+        ui_color_attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        ui_color_attachment.loadOp      = VK_ATTACHMENT_LOAD_OP_LOAD;
+        ui_color_attachment.storeOp     = VK_ATTACHMENT_STORE_OP_STORE;
+
+        VkRenderingInfoKHR ui_rendering_info = {};
+
+        ui_rendering_info.sType                = VK_STRUCTURE_TYPE_RENDERING_INFO_KHR;
+        ui_rendering_info.renderArea           = { { 0, 0 }, { m_width, m_height } };
+        ui_rendering_info.layerCount           = 1;
+        ui_rendering_info.colorAttachmentCount = 1;
+        ui_rendering_info.pColorAttachments    = &ui_color_attachment;
+        ui_rendering_info.pDepthAttachment     = nullptr;
+        ui_rendering_info.pStencilAttachment   = nullptr;
+
+        vkCmdBeginRenderingKHR(cmd_buf->handle(), &ui_rendering_info);
+
         render_gui(cmd_buf);
 
-        vkCmdEndRenderPass(cmd_buf->handle());
+        vkCmdEndRenderingKHR(cmd_buf->handle());
+
+        m_vk_backend->use_resource(
+            VK_PIPELINE_STAGE_2_NONE,
+            VK_ACCESS_2_NONE,
+            VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            color_image,
+            color_range
+        );
+
+        m_vk_backend->flush_barriers(cmd_buf);
     }
 
     // -----------------------------------------------------------------------------------------------------------------------------------
