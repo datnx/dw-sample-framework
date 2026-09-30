@@ -3429,8 +3429,10 @@ void Backend::initialize()
         .add_pool_size(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4096)
         .add_pool_size(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1024)
         .add_pool_size(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1024)
-        .add_pool_size(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 16)
-        .add_pool_size(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 32);
+        .add_pool_size(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 16);
+
+    if (m_ray_tracing_enabled)
+        dp_desc.add_pool_size(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 32);
 
     m_descriptor_pool = DescriptorPool::create(shared_from_this(), dp_desc);
 
