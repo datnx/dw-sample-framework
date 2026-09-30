@@ -156,6 +156,7 @@ public:
     inline std::shared_ptr<Sampler>                           trilinear_sampler() { return m_trilinear_sampler; }
     inline std::shared_ptr<Sampler>                           nearest_sampler() { return m_nearest_sampler; }
     inline std::shared_ptr<ImageView>                         default_cubemap() { return m_default_cubemap_image_view; }
+    inline bool                                               ray_tracing_enabled() { return m_ray_tracing_enabled; }
 
 private:
     Backend(GLFWwindow* window, bool vsync, bool srgb_swapchain, bool enable_validation_layers, bool enable_nsight_aftermath, bool require_ray_tracing, std::vector<const char*> additional_device_extensions);
